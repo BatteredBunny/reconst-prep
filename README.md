@@ -43,6 +43,7 @@ TODO: detail installing the windows release
 
 ## Development
 
-`nix develop` (or `direnv allow`) gives you the toolchain, ffmpeg, the GUI's
-runtime libs and `just`. `just --list` for the tasks; `just ci` runs exactly
-what CI gates on. Design decisions and open work are in `PLAN.md`.
+The recommended way is to use the nix dev shell which will provide you with all the dependencies.
+It can be enabled by running `nix develop` (or `direnv allow` to apply it automatically).
+
+Have a look at the steps in the justfile.

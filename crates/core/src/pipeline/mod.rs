@@ -264,13 +264,14 @@ fn mask_dirs(cfg: &PipelineConfig) -> Result<MaskDirs> {
 
 /// The parameters of this run, as they will be recorded.
 fn manifest_params(cfg: &PipelineConfig) -> ManifestParams {
+    let gpu = cfg.gpu && cfg.profile_path.is_some() && !crate::undistort::gpu_devices().is_empty();
     ManifestParams {
         output_size: cfg.output_size,
         format: cfg.format,
         selection: cfg.selection.clone(),
         hwaccel: cfg.hwaccel.clone(),
         interpolation: cfg.interp,
-        gpu: cfg.gpu,
+        gpu,
         masking: cfg.mask.is_active().then(|| cfg.mask.describe()),
     }
 }
@@ -418,6 +419,28 @@ pub fn run_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_that_cannot_undistort_records_no_gpu() {
+        let cfg = PipelineConfig {
+            inputs: vec![],
+            profile_path: None,
+            out_dir: PathBuf::new(),
+            output_size: OutputSpec::Same,
+            format: ImageFormat::Jpeg { quality: 95 },
+            selection: SelectionConfig::default(),
+            hwaccel: HwAccel::Auto,
+            ffmpeg_path: None,
+            interp: Interp::Bilinear,
+            gpu: true,
+            mask: MaskConfig::default(),
+            writer_threads: 0,
+            undistort_threads: 0,
+            resume: false,
+            frames_from: None,
+        };
+        assert!(!manifest_params(&cfg).gpu);
+    }
 
     #[test]
     fn output_spec_resolves_even_dims() {

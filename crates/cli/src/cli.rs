@@ -29,6 +29,7 @@ fn long_version() -> &'static str {
 #[derive(Parser, Debug)]
 #[command(
     name = "reconst-prep",
+    bin_name = "reconst-prep",
     about = ABOUT,
     version,
     long_version = long_version(),

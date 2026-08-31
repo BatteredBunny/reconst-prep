@@ -3,9 +3,9 @@ Set-Location $PSScriptRoot
 
 $Version = (Select-String -Path ..\..\Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
 
-$FfmpegRelease = "autobuild-2026-07-31-12-50"
-$FfmpegZip = "ffmpeg-n8.0-latest-win64-lgpl-shared-8.0.zip"
-$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FfmpegRelease/$FfmpegZip"
+$FfmpegVersion = "9.0.1"
+$FfmpegZip = "ffmpeg-$FfmpegVersion-full_build-shared.zip"
+$FfmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/$FfmpegVersion/$FfmpegZip"
 
 Push-Location ..\..
 cargo build --locked --release -p reconst-prep
@@ -21,9 +21,12 @@ if (-not (Test-Path $FfmpegZip)) {
     Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfmpegZip
 }
 Expand-Archive $FfmpegZip -DestinationPath ffmpeg-tmp -Force
-# bin/ contains ffmpeg.exe, ffprobe.exe and the LGPL DLLs they need.
-Copy-Item ffmpeg-tmp\*\bin\* $Publish
-Copy-Item ffmpeg-tmp\*\LICENSE.txt $Publish\LICENSE-ffmpeg.txt -ErrorAction SilentlyContinue
+Copy-Item ffmpeg-tmp\*\bin\* $Publish -Exclude ffplay.exe
+$FfmpegLicense = Get-ChildItem ffmpeg-tmp\*\LICENSE* | Select-Object -First 1
+if (-not $FfmpegLicense) {
+    throw "failed to find the license"
+}
+Copy-Item $FfmpegLicense $Publish\LICENSE-ffmpeg.txt
 Remove-Item -Recurse -Force ffmpeg-tmp
 
 # Velopack CLI: dotnet tool install -g vpk

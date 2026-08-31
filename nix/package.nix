@@ -42,7 +42,7 @@ rustPlatform.buildRustPackage {
   pname = "reconst-prep";
   version = "0.1.0";
 
-  src = ./.;
+  src = ../.;
 
   cargoDeps = rustPlatform.importCargoLock {
     lockFile = ../Cargo.lock;

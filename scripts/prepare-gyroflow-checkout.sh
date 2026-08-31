@@ -11,11 +11,15 @@ fi
 
 glob="${CARGO_HOME:-$HOME/.cargo}/git/checkouts/gyroflow-*/${REV:0:7}*"
 
+shopt -s nullglob
+
 checkouts=()
 find_checkouts() {
   checkouts=()
   for d in $glob; do
-    [ -d "$d" ] && checkouts+=("$d")
+    if [ -d "$d" ]; then
+      checkouts+=("$d")
+    fi
   done
 }
 

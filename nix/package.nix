@@ -20,12 +20,7 @@
 }:
 
 let
-  ffmpeg = ffmpeg-headless.override {
-    withVaapi = true;
-    withVdpau = true;
-    withNvdec = true;
-    withVulkan = true;
-  };
+  ffmpeg = ffmpeg-headless;
 
   guiLibs = [
     libGL

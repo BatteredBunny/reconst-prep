@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "crates/gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/BatteredBunny/reconst-prep"
+
+[workspace.dependencies]
+gyroflow-core = { git = "https://github.com/gyroflow/gyroflow.git", rev = "b5e8828f82c150676e48a7c2e3db39c97392f606", default-features = false }
+
+ffmpeg-sidecar = { version = "2.5.2", default-features = false }
+fast_image_resize = "6.1.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+etcetera = "0.11.0"
+tempfile = "3.27.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+crossbeam-channel = "0.5.16"
+clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
+anyhow = "1.0.104"
+eframe = { version = "0.36.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.36.1"
+# Main egui-phosphor has no egui 0.36 support yet :(
+# amPerl/egui-phosphor#44
+egui-phosphor = { git = "https://github.com/UnknownSuperficialNight/egui-phosphor.git", rev = "d392183fe3766d49a78e4fce249e73777985119a" }
+rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
+log = "0.4.34"
+env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
+rustfft = "6.4.1"
+ctrlc = "3.5.2"
+ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
+
+[profile.release]
+lto = "thin"
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,7 @@
+/target
+*.AppImage
+/packaging/appimage/AppDir
+/packaging/windows/releases
+result
+/.direnv
+/.pre-commit-config.yaml

@@ -1,0 +1,24 @@
+[package]
+name = "reconst-prep-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Turns input video into an image dataset for 3D reconstruction."
+
+[lib]
+name = "reconst_prep_gui"
+path = "src/lib.rs"
+
+[dependencies]
+reconst-prep-core = { path = "../core" }
+eframe.workspace = true
+egui.workspace = true
+egui-phosphor.workspace = true
+log.workspace = true
+rfd.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true

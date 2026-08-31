@@ -1,0 +1,27 @@
+[package]
+name = "reconst-prep-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reconstruction-ready image datasets from video"
+
+[dependencies]
+gyroflow-core.workspace = true
+ffmpeg-sidecar.workspace = true
+fast_image_resize.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true
+crossbeam-channel.workspace = true
+anyhow.workspace = true
+etcetera.workspace = true
+tempfile.workspace = true
+log.workspace = true
+tract-onnx = { version = "0.23.5", default-features = false }
+percent-encoding = "2.3.2"
+
+[dev-dependencies]
+rustfft.workspace = true

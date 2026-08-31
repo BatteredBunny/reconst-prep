@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=reconst-prep
+Comment=Easy to use tool for preparing video footage for 3D reconstruction as an image dataset.
+Exec=reconst-prep gui
+Icon=reconst-prep
+Categories=Graphics;Photography;
+Terminal=false

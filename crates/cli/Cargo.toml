@@ -1,0 +1,22 @@
+[package]
+name = "reconst-prep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reconstruction-ready image datasets from video"
+
+[[bin]]
+name = "reconst-prep"
+path = "src/main.rs"
+
+[dependencies]
+reconst-prep-core = { path = "../core" }
+reconst-prep-gui = { path = "../gui" }
+clap.workspace = true
+clap_complete.workspace = true
+anyhow.workspace = true
+ctrlc.workspace = true
+log.workspace = true
+env_logger.workspace = true
+indicatif = "0.18.6"

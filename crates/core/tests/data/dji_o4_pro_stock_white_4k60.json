@@ -1,0 +1,70 @@
+{
+  "name": "DJI_O4 Pro_stock_wide_4k_4by3_3840x2880-59.94fps",
+  "note": "",
+  "calibrated_by": "mina",
+  "camera_brand": "DJI",
+  "camera_model": "O4 Pro",
+  "lens_model": "stock",
+  "camera_setting": "wide",
+  "calib_dimension": {
+    "w": 3840,
+    "h": 2880
+  },
+  "orig_dimension": {
+    "w": 3840,
+    "h": 2880
+  },
+  "output_dimension": {
+    "w": 3840,
+    "h": 2880
+  },
+  "frame_readout_time": null,
+  "frame_readout_direction": null,
+  "gyro_lpf": null,
+  "input_horizontal_stretch": 1.0,
+  "input_vertical_stretch": 1.0,
+  "num_images": 15,
+  "fps": 59.94006,
+  "crop": null,
+  "official": false,
+  "asymmetrical": false,
+  "fisheye_params": {
+    "RMS_error": 0.5195723719943848,
+    "camera_matrix": [
+      [
+        1454.6438755400513,
+        0.0,
+        1922.4655467091939
+      ],
+      [
+        0.0,
+        1457.5046968873496,
+        1426.8890653230112
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "distortion_coeffs": [
+      0.18767248193284766,
+      -0.04235594621169722,
+      0.19784700188113621,
+      -0.14319636003369843
+    ],
+    "radial_distortion_limit": null
+  },
+  "identifier": "",
+  "calibrator_version": "1.6.3",
+  "date": "2026-08-03",
+  "compatible_settings": [],
+  "sync_settings": null,
+  "distortion_model": null,
+  "digital_lens": null,
+  "digital_lens_params": null,
+  "interpolations": null,
+  "focal_length": null,
+  "crop_factor": null,
+  "global_shutter": false
+}

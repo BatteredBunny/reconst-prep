@@ -9,7 +9,10 @@ if [ -z "$REV" ]; then
   exit 1
 fi
 
-glob="${CARGO_HOME:-$HOME/.cargo}/git/checkouts/gyroflow-*/${REV:0:7}*"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_home="${cargo_home//\\//}"
+
+glob="$cargo_home/git/checkouts/gyroflow-*/${REV:0:7}*"
 
 shopt -s nullglob
 

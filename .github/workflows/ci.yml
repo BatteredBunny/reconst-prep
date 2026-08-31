@@ -52,8 +52,8 @@ jobs:
       - run: ./packaging/appimage/build.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reconst-prep-appimage
-          path: packaging/appimage/*.AppImage*
+          path: packaging/appimage/*.AppImage
+          archive: false
 
   build-windows:
     name: release build + Velopack installer (windows)
@@ -78,5 +78,5 @@ jobs:
         run: ./packaging/windows/build-velopack.ps1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reconst-prep-windows-x86_64
-          path: packaging/windows/releases/*
+          path: packaging/windows/releases/ReconstPrep-win-Setup.exe
+          archive: false

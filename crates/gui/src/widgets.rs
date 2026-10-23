@@ -27,7 +27,7 @@ pub fn category<R>(
             let (on, enabled) = (*flag, response.enabled());
             response.widget_info(|| {
                 egui::WidgetInfo::selected(
-                    egui::WidgetType::Checkbox,
+                    egui::Role::CheckBox,
                     enabled,
                     on,
                     format!("Enable {title}"),
@@ -57,7 +57,7 @@ pub fn category<R>(
     let toggle = clickable(toggle);
     toggle.widget_info(|| {
         egui::WidgetInfo::selected(
-            egui::WidgetType::CollapsingHeader,
+            egui::Role::DisclosureTriangle,
             true,
             is_open,
             format!("{title} section"),
@@ -229,7 +229,7 @@ fn run_button(
         button = button.fill(fill).stroke(egui::Stroke::NONE);
     }
     let response = ui.add(button);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     response
 }
 
@@ -252,7 +252,7 @@ pub fn modal<R>(
     width: f32,
     add_body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> bool {
-    let id = egui::Id::new(id_source);
+    let id = egui::Id::unique(id_source);
     // The backdrop would take the same release as a click on itself; the guard stores the pass it was drawn on, so a dialog closed from outside self-heals.
     let now = ctx.cumulative_pass_nr();
     let first_frame = ctx.data_mut(|d| {

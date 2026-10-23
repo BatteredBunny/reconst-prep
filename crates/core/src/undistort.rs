@@ -241,12 +241,22 @@ impl Undistorter {
         );
         let backend = if self.rgba.is_some() {
             let (rgba_in, _) = self.rgba.as_mut().unwrap();
-            for (dst, src) in rgba_in.chunks_exact_mut(4).zip(input.chunks_exact(3)) {
+            for (dst, src) in rgba_in
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(input.as_chunks::<3>().0)
+            {
                 dst[..3].copy_from_slice(src);
             }
             let backend = self.process::<RGBA8>(4)?;
             let (_, rgba_out) = self.rgba.as_ref().unwrap();
-            for (dst, src) in out.chunks_exact_mut(3).zip(rgba_out.chunks_exact(4)) {
+            for (dst, src) in out
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(rgba_out.as_chunks::<4>().0)
+            {
                 dst.copy_from_slice(&src[..3]);
             }
             backend

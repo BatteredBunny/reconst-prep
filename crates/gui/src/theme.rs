@@ -75,7 +75,7 @@ pub fn app_icon() -> egui::IconData {
 
 /// Decoded on first call, then served from the context's data store.
 pub fn icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
-    let id = egui::Id::new("app-icon-texture");
+    let id = egui::Id::unique("app-icon-texture");
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return tex;
     }

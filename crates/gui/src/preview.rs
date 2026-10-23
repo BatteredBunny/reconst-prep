@@ -113,7 +113,7 @@ fn build_overlay(layers: &[(MaskClass, Mask)], w: u32, h: u32) -> Option<Display
     for (class, mask) in layers {
         let scaled = mask.scaled_to(w, h);
         let c = class_color(*class);
-        for (px, &valid) in rgba.chunks_exact_mut(4).zip(&scaled.data) {
+        for (px, &valid) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(&scaled.data) {
             if valid == 0 {
                 px[0] = c[0];
                 px[1] = c[1];

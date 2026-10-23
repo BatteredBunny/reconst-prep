@@ -102,12 +102,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             };
             // Eased, so progress arriving in bursts reads as movement.
             let clip_frac = ctx.animate_value_with_time(
-                egui::Id::new("clip_progress"),
+                egui::Id::unique("clip_progress"),
                 target,
                 crate::theme::MOTION_S,
             );
             let fps_target = (p.decoded_this_run as f64 / p.elapsed_s.max(1e-9)) as f32;
-            let fps = ctx.animate_value_with_time(egui::Id::new("fps"), fps_target, 0.4);
+            let fps = ctx.animate_value_with_time(egui::Id::unique("fps"), fps_target, 0.4);
             let eta = match p.clip_eta_s(fps as f64) {
                 Some(left) => format!("{} left in clip", crate::widgets::mmss(left)),
                 None => String::new(),
@@ -171,7 +171,7 @@ pub fn drop_overlay(ctx: &egui::Context) {
     let screen = ctx.viewport_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("drop_overlay"),
+        egui::Id::unique("drop_overlay"),
     ));
     painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(180));
     painter.text(
@@ -197,7 +197,7 @@ pub fn toasts(app: &mut App, ctx: &egui::Context) {
     }
     let dt = ctx.input(|i| i.stable_dt);
     let mut dismissed: Option<usize> = None;
-    egui::Area::new(egui::Id::new("toasts"))
+    egui::Area::new(egui::Id::unique("toasts"))
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -48.0))
         .show(ctx, |ui| {
             for (i, toast) in app.toasts.iter().enumerate() {

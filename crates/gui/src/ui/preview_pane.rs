@@ -216,7 +216,7 @@ fn image_view(app: &mut App, ui: &mut egui::Ui) {
     if app.preview_busy {
         painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(110));
         // An `Area`, not `ui.put`: a widget placed inside an allocated rect drags the layout cursor back there.
-        egui::Area::new(ui.id().with("preview_spinner"))
+        egui::Area::new(ui.scope_id().with("preview_spinner"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.center() - egui::vec2(16.0, 16.0))
             .show(ui.ctx(), |ui| ui.add(egui::Spinner::new()));
@@ -304,7 +304,7 @@ fn overlay_bar(
     pos: egui::Pos2,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::Area::new(ui.id().with(id_source))
+    egui::Area::new(ui.scope_id().with(id_source))
         .order(egui::Order::Middle)
         .pivot(pivot)
         .fixed_pos(pos)

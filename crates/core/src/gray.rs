@@ -84,7 +84,7 @@ pub fn nn_scale(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 /// RGB8 -> grayscale (BT.601 integer approximation, plenty for metrics).
 pub fn rgb_to_gray(rgb: &[u8], w: u32, h: u32) -> GrayFrame {
     let mut data = Vec::with_capacity((w * h) as usize);
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         let y = (77 * px[0] as u32 + 150 * px[1] as u32 + 29 * px[2] as u32) >> 8;
         data.push(y as u8);
     }

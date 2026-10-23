@@ -56,7 +56,7 @@ fn circle_button(ui: &mut egui::Ui, glyph: &str, size: f32, name: &str) -> egui:
         egui::FontId::proportional(size),
         colour,
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     crate::widgets::clickable(response).on_hover_text(name)
 }
 
@@ -79,7 +79,7 @@ pub fn labelled(icon: &str, text: &str) -> String {
 pub fn icon_button(ui: &mut egui::Ui, icon: &str, name: &str) -> egui::Response {
     let response = ui.small_button(icon);
     let enabled = response.enabled();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     crate::widgets::clickable(response).on_hover_text(name)
 }
 
@@ -87,6 +87,6 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, name: &str) -> egui::Response 
 pub fn button(ui: &mut egui::Ui, icon: &str, text: &str) -> egui::Response {
     let response = ui.button(labelled(icon, text));
     let enabled = response.enabled();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     response
 }

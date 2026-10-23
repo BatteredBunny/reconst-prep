@@ -23,8 +23,8 @@ crossbeam-channel = "0.5.16"
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
 anyhow = "1.0.104"
-eframe = { version = "0.36.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
-egui = "0.36.1"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.37.0"
 # Main egui-phosphor has no egui 0.36 support yet :(
 # amPerl/egui-phosphor#44
 egui-phosphor = { git = "https://github.com/UnknownSuperficialNight/egui-phosphor.git", rev = "d392183fe3766d49a78e4fce249e73777985119a" }

@@ -33,7 +33,7 @@ log = "0.4.34"
 env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
 rustfft = "6.4.1"
 ctrlc = "3.5.2"
-ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 
 [profile.release]
 lto = "thin"

@@ -13,11 +13,14 @@ pub fn category<R>(
     add_body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
     let id = ui.make_persistent_id(id_source);
-    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
         default_open,
     );
+    if let Some(open) = crate::demo::forced_open(ui.ctx(), id_source) {
+        state.set_open(open);
+    }
 
     let mut title_clicked = false;
     let mut header = state.show_header(ui, |ui| {
@@ -110,6 +113,9 @@ pub fn subsection_beside<R>(
     let id = ui.make_persistent_id(id_source);
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if let Some(open) = crate::demo::forced_open(ui.ctx(), id_source) {
+        state.set_open(open);
+    }
     let row = ui.horizontal(|ui| {
         header(ui);
         ui.add_space(6.0);

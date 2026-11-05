@@ -5,7 +5,7 @@ ci: fmt-check clippy test
 
 setup:
     ./scripts/prepare-gyroflow-checkout.sh
-    
+
 fmt:
     cargo fmt --all
 
@@ -38,6 +38,9 @@ nix-build:
 
 nix-check:
     nix flake check
+
+screenshots *ARGS:
+    nix run .#screenshots -- {{ ARGS }}
 
 appimage:
     ./packaging/appimage/build.sh

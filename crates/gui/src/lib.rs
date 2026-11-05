@@ -13,6 +13,7 @@ use reconst_prep_core::profiles::ProfileEntry;
 use reconst_prep_core::undistort::ProfileSummary;
 
 mod clips;
+mod demo;
 mod icons;
 mod preview;
 mod settings;
@@ -33,8 +34,16 @@ pub struct Start {
 
 /// Launch the GUI. Blocks until the window is closed.
 pub fn run(start: Start) -> eframe::Result {
-    let settings = Settings::load();
-    let size = settings.window_size.unwrap_or([1360.0, 900.0]);
+    let screenshots = demo::Screenshots::from_env();
+    // The user's own settings would make the screenshots differ from machine to machine.
+    let settings = match screenshots {
+        Some(_) => Settings::default(),
+        None => Settings::load(),
+    };
+    let size = match screenshots {
+        Some(_) => demo::WINDOW,
+        None => settings.window_size.unwrap_or([1360.0, 900.0]),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(size)
@@ -49,7 +58,11 @@ pub fn run(start: Start) -> eframe::Result {
         options,
         Box::new(move |cc| {
             theme::install(&cc.egui_ctx);
-            Ok(Box::new(App::from_settings(settings).with(start)))
+            let app = App::from_settings(settings).with(start);
+            Ok(match screenshots {
+                Some(demo) => demo.drive(app),
+                None => Box::new(app),
+            })
         }),
     )
 }

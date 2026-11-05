@@ -29,6 +29,10 @@ pub const RESUME: &str = ph::ARROW_CLOCKWISE;
 pub const REMOVE: &str = ph::X;
 /// Empty the whole list. Deliberately not the same glyph as [`REMOVE`].
 pub const CLEAR: &str = ph::TRASH;
+pub const FRAME_BACK: &str = ph::CARET_LEFT;
+pub const FRAME_FORWARD: &str = ph::CARET_RIGHT;
+/// On the before/after divider's handle.
+pub const DRAG_SIDEWAYS: &str = ph::ARROWS_LEFT_RIGHT;
 
 // --- Status ----------------------------------------------------------------
 

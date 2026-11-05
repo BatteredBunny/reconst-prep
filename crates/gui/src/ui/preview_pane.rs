@@ -256,15 +256,13 @@ fn wipe_handle(painter: &egui::Painter, rect: egui::Rect, x: f32, hot: bool) {
         egui::Color32::from_black_alpha(150),
         egui::Stroke::new(1.5, line),
     );
-    for (dx, arrow) in [(-4.0, "◀"), (4.0, "▶")] {
-        painter.text(
-            centre + egui::vec2(dx, 0.0),
-            egui::Align2::CENTER_CENTER,
-            arrow,
-            egui::FontId::proportional(8.0),
-            line,
-        );
-    }
+    painter.text(
+        centre,
+        egui::Align2::CENTER_CENTER,
+        crate::icons::DRAG_SIDEWAYS,
+        egui::FontId::proportional(12.0),
+        line,
+    );
 }
 
 /// "before" and "after", not "source" and "undistorted": naming the operation would mean a label that changes as you work.
@@ -374,8 +372,8 @@ fn step_controls(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect) {
     let pos = rect.right_bottom() + egui::vec2(-10.0, -44.0);
     overlay_bar(ui, "step_controls", egui::Align2::RIGHT_TOP, pos, |ui| {
         for (label, dir, hover) in [
-            ("◀", -1.0, "One frame back"),
-            ("▶", 1.0, "One frame forward"),
+            (crate::icons::FRAME_BACK, -1.0, "One frame back"),
+            (crate::icons::FRAME_FORWARD, 1.0, "One frame forward"),
         ] {
             if ui
                 .add_enabled(step.is_some(), egui::Button::new(label).min_size(SQUARE))

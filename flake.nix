@@ -42,6 +42,7 @@
         {
           inherit (scope) reconst-prep;
           default = scope.reconst-prep;
+          screenshots = pkgs.callPackage ./nix/screenshots.nix { inherit (scope) reconst-prep; };
         }
       );
 

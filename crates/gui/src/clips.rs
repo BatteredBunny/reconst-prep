@@ -7,23 +7,24 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use reconst_prep_core::decode::ClipInfo;
+use reconst_prep_core::frame::Size;
 
 use crate::preview;
 
 #[derive(Default)]
 pub(crate) struct ClipLibrary {
     /// What the user chose: files and directories, not yet expanded.
-    pub inputs: Vec<PathBuf>,
+    inputs: Vec<PathBuf>,
     /// Cached because expanding walks the filesystem and the UI asks several times per frame.
     expanded: Vec<PathBuf>,
     /// The `inputs` value `expanded` was computed from.
     expanded_from: Vec<PathBuf>,
     /// ffprobe results, filled in by a worker. `Err` for files that will fail.
-    pub probes: HashMap<PathBuf, Result<ClipInfo, String>>,
+    probes: HashMap<PathBuf, Result<ClipInfo, String>>,
     /// Separate from `probes`, where every entry is an answer.
     probes_pending: HashSet<PathBuf>,
     /// `None` means tried and failed, which is what stops it being retried every frame.
-    pub thumbs: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    thumbs: HashMap<PathBuf, Option<egui::TextureHandle>>,
     /// Capped so a dropped folder of two hundred clips does not spawn a thread each.
     thumbs_running: usize,
     /// Separate from `thumbs`, where `None` means "tried and failed".
@@ -56,6 +57,18 @@ impl ClipLibrary {
         &self.expanded
     }
 
+    pub fn inputs(&self) -> &[PathBuf] {
+        &self.inputs
+    }
+
+    pub fn probe(&self, path: &Path) -> Option<&Result<ClipInfo, String>> {
+        self.probes.get(path)
+    }
+
+    pub fn thumb(&self, path: &Path) -> Option<&Option<egui::TextureHandle>> {
+        self.thumbs.get(path)
+    }
+
     /// Adds a path unless it is already listed; reports whether it was new.
     pub fn add(&mut self, path: PathBuf) -> bool {
         let new = !self.inputs.contains(&path);
@@ -76,10 +89,12 @@ impl ClipLibrary {
 
     pub fn clear(&mut self) {
         let running = self.thumbs_running;
+        let probing = std::mem::take(&mut self.probes_pending);
         *self = Self::default();
-        // In-flight workers still report back, and their answers are dropped
-        // by `on_thumbnail`; the running count must survive to stay balanced.
+        // In-flight workers still report back, and their answers are dropped by
+        // `on_thumbnail`/`on_probed`; what they hold must still count against the caps.
         self.thumbs_running = running;
+        self.probes_pending = probing;
     }
 
     /// Probed info for every clip, in run order, skipping ones that failed.
@@ -94,26 +109,21 @@ impl ClipLibrary {
     }
 
     /// The smallest probed frame size per axis; `None` while nothing has probed yet.
-    pub fn source_ceiling(&self) -> Option<(u32, u32)> {
+    pub fn source_ceiling(&self) -> Option<Size> {
         self.probed()
             .iter()
-            .map(|(_, c)| (c.width, c.height))
-            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+            .map(|(_, c)| c.size)
+            .reduce(|a, b| Size::new(a.w.min(b.w), a.h.min(b.h)))
     }
 
     /// More than one means a run will fail partway.
-    pub fn mixed_resolutions(&self) -> Vec<(u32, u32)> {
-        let mut sizes: Vec<(u32, u32)> = self
-            .probed()
-            .iter()
-            .map(|(_, c)| (c.width, c.height))
-            .collect();
-        sizes.sort_unstable();
+    pub fn mixed_resolutions(&self) -> Vec<Size> {
+        let mut sizes: Vec<Size> = self.probed().iter().map(|(_, c)| c.size).collect();
+        sizes.sort_unstable_by_key(|s| (s.w, s.h));
         sizes.dedup();
         sizes
     }
 
-    /// Is this clip's probe still in flight?
     pub fn probing(&self, path: &Path) -> bool {
         self.probes_pending.contains(path)
     }

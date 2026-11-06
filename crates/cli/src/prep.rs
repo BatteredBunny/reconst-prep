@@ -3,7 +3,8 @@
 use indicatif::{ProgressBar, ProgressStyle};
 
 use reconst_prep_core::cancel::{CancelToken, is_cancelled};
-use reconst_prep_core::pipeline::{Progress, run_pipeline};
+use reconst_prep_core::decode::FfmpegNotFound;
+use reconst_prep_core::pipeline::{OutDirConflict, PipelineConfig, Progress, run_pipeline};
 
 use crate::cli::PrepArgs;
 use crate::config::build_config;
@@ -44,8 +45,26 @@ pub fn run(args: PrepArgs) {
         }
         Err(e) => {
             eprintln!("error: {e:#}");
+            if let Some(hint) = hint(&e, &cfg) {
+                eprintln!("{hint}");
+            }
             std::process::exit(1);
         }
+    }
+}
+
+/// Core errors name no flags, since the GUI has none; the advice is added here.
+fn hint(e: &anyhow::Error, cfg: &PipelineConfig) -> Option<&'static str> {
+    if e.downcast_ref::<FfmpegNotFound>().is_some() && cfg.ffmpeg_path.is_none() {
+        return Some("Or pass --ffmpeg-path to point at an ffmpeg binary.");
+    }
+    match e.downcast_ref::<OutDirConflict>()? {
+        OutDirConflict::DifferentDataset { .. } => Some(
+            "Writing into it would leave images from two selections side by side. Use a different --out, or empty this one first.",
+        ),
+        OutDirConflict::ResumeRefused { .. } => Some(
+            "Resuming would mix two selections into one dataset. Use a different --out, or drop --resume to start over.",
+        ),
     }
 }
 
@@ -94,7 +113,7 @@ impl ClipProgress {
             "kept {} written {} ({:.1} fps)",
             p.total_kept,
             p.total_written,
-            p.decoded_this_run as f64 / p.elapsed_s.max(1e-9),
+            p.decode_fps(),
         ));
     }
 

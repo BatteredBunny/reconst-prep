@@ -6,12 +6,13 @@ use anyhow::{Context, Result, bail};
 
 use crate::cancel::{CancelToken, Cancelled};
 use crate::decode::{ClipInfo, Decoder, Ffmpeg, RawFrame};
-use crate::gray::{GrayFrame, laplacian_variance, metric_rgb, resize_rgb, rgb_to_gray};
-use crate::mask::{Mask, MaskConfig, MaskSet};
+use crate::frame::{Rgb8, Size};
+use crate::gray::{GrayFrame, metric_rgb, resize_rgb, rgb_to_gray};
+use crate::mask::{Mask, MaskSet, PreparedMask};
 use crate::output::{MaskWrite, WriteJob, WriterPool};
 use crate::seg::SegLabels;
-use crate::select::{ClipSelection, Decision, FrameInfo, Selector, make_selector};
-use crate::undistort::{LensOnlyParams, Undistorter};
+use crate::select::{Decision, FrameInfo, Selector, make_selector};
+use crate::undistort::{LensOnlyParams, LensProfileFile, Undistorter};
 
 use super::{PipelineConfig, Progress};
 
@@ -45,6 +46,10 @@ pub(super) struct ClipRun<'a> {
     pub n_clips: usize,
     pub t0: Instant,
     pub cancel: &'a CancelToken,
+    /// `None` disables undistortion for the whole run.
+    pub lens: Option<&'a LensProfileFile>,
+    /// Settled once in preflight, so the manifest records what every clip was asked to run on.
+    pub gpu: Option<usize>,
 }
 
 /// Totals across all clips so far; progress reports are run-wide.
@@ -59,27 +64,18 @@ pub(super) struct Totals {
     pub carried_clips: usize,
 }
 
-/// What one clip contributed: its manifest record, built here because this is
-/// where every input to it already is, plus the one fact the record cannot hold.
-pub(super) struct ClipDone {
-    pub record: super::ManifestClip,
-    /// Whether the wgpu kernel actually rendered, which is not the same as
-    /// having asked for it: gyroflow falls back to the CPU on its own.
-    pub gpu_used: bool,
-}
-
 /// Masks stay at metric resolution until the frame is kept.
 struct PendingFrame {
-    rgb: Vec<u8>,
+    rgb: Rgb8,
     mask: Option<MaskSet>,
 }
 
 /// Masking and sharpness are absent on purpose: both can depend on neighbouring frames, so the serial stage computes them.
 struct Processed {
     index: u64,
-    rgb: Vec<u8>,
+    rgb: Rgb8,
     /// Metric-resolution RGB thumbnail; the mask sources run on it.
-    small: Vec<u8>,
+    small: Rgb8,
     gray: GrayFrame,
     seg: Option<SegLabels>,
 }
@@ -88,10 +84,23 @@ struct Processed {
 pub(super) struct ClipJob<'a> {
     pub idx: usize,
     pub info: &'a ClipInfo,
-    /// `None` disables undistortion for the whole run.
-    pub profile_json: Option<&'a str>,
     /// The exact frames to keep. Replay mode only.
     pub replay: Option<&'a [u64]>,
+}
+
+/// Where the stage reads frames from. A trait only so tests can drive the stage without ffmpeg.
+pub(super) trait FrameSource: Sync {
+    fn frames(&self) -> impl Iterator<Item = Result<RawFrame>> + '_;
+    fn cancel(&self);
+}
+
+impl FrameSource for Decoder {
+    fn frames(&self) -> impl Iterator<Item = Result<RawFrame>> + '_ {
+        Decoder::frames(self)
+    }
+    fn cancel(&self) {
+        Decoder::cancel(self)
+    }
 }
 
 impl ClipRun<'_> {
@@ -100,74 +109,46 @@ impl ClipRun<'_> {
         job: ClipJob<'_>,
         totals: &mut Totals,
         progress: &mut dyn FnMut(Progress),
-    ) -> Result<ClipDone> {
-        let ClipJob {
-            idx: clip_idx,
-            info: clip,
-            profile_json,
-            replay,
-        } = job;
+    ) -> Result<super::ManifestClip> {
+        let clip = job.info;
         let cfg = self.cfg;
-        let (out_w, out_h) = cfg.output_size.resolve(clip.width, clip.height)?;
-        let params = profile_json
-            .map(|json| {
-                LensOnlyParams::new(
-                    json,
-                    clip.width as usize,
-                    clip.height as usize,
-                    out_w,
-                    out_h,
-                )
-            })
-            .transpose()?;
-        let intrinsics = params.as_ref().map(|p| p.output_intrinsics()).transpose()?;
+        let out = cfg.output_size.resolve(clip.size)?;
+        let params = self.lens.map(|l| l.params(clip.size, out)).transpose()?;
 
         // Opened per clip: the model binds to one input geometry and clips may differ in aspect.
-        let mask_cfg = cfg.mask.prepare(out_w as u32, out_h as u32)?;
+        let mask = cfg.mask.prepare(out)?;
 
-        let mut selector = make_selector(&cfg.selection, ClipSelection { replay })?;
+        let mut selector = make_selector(&cfg.selection, job.replay)?;
         let decoder = Decoder::spawn(self.ff, &clip.path, &cfg.hwaccel)?;
         let stage = Stage {
             run: self,
-            clip_idx,
+            clip_idx: job.idx,
             clip,
-            out: (out_w, out_h),
-            params: &params,
-            mask_cfg: &mask_cfg,
-            emitter: Emitter {
-                run: self,
-                clip,
-                out_w,
-                out_h,
-            },
+            out,
+            params: params.as_ref(),
+            mask: &mask,
         };
-        let (decoded, kept_frames, gpu_used) =
-            stage.run(&decoder, &mut *selector, totals, progress)?;
-        // A cancelled decode ends the frame loop quietly, and recording a truncated clip is one `--resume` skips forever.
-        self.cancel.check()?;
+        let outcome = stage.run(&decoder, &mut *selector, totals, progress)?;
 
-        if decoded == 0 {
+        if outcome.decoded == 0 {
             bail!("{}: ffmpeg produced no frames", clip.path.display());
         }
-        totals.decoded += decoded;
-        totals.kept += kept_frames.len() as u64;
+        totals.decoded += outcome.decoded;
+        totals.kept += outcome.kept.len() as u64;
 
-        Ok(ClipDone {
-            record: super::ManifestClip {
-                path: clip.path.display().to_string(),
-                stem: clip.stem.clone(),
-                width: clip.width,
-                height: clip.height,
-                fps: clip.fps,
-                frames_probed: clip.frames,
-                frames_decoded: decoded,
-                frames_kept: kept_frames.len() as u64,
-                out_width: out_w,
-                out_height: out_h,
-                pinhole_intrinsics: intrinsics,
-                kept_frames,
-            },
-            gpu_used,
+        Ok(super::ManifestClip {
+            path: clip.path.display().to_string(),
+            stem: clip.stem.clone(),
+            width: clip.size.w,
+            height: clip.size.h,
+            fps: clip.fps,
+            frames_probed: clip.frames,
+            frames_decoded: outcome.decoded,
+            frames_kept: outcome.kept.len() as u64,
+            out_width: out.w,
+            out_height: out.h,
+            pinhole_intrinsics: params.as_ref().map(LensOnlyParams::output_intrinsics),
+            kept_frames: outcome.kept,
         })
     }
 }
@@ -177,74 +158,14 @@ struct Stage<'a> {
     run: &'a ClipRun<'a>,
     clip_idx: usize,
     clip: &'a ClipInfo,
-    out: (usize, usize),
-    params: &'a Option<LensOnlyParams>,
-    mask_cfg: &'a MaskConfig,
-    emitter: Emitter<'a>,
+    out: Size,
+    params: Option<&'a LensOnlyParams>,
+    mask: &'a PreparedMask,
 }
 
-fn worker_count(cfg: &PipelineConfig, mask_cfg: &MaskConfig) -> usize {
-    super::threads(cfg.undistort_threads, || {
-        if mask_cfg.model.is_some() {
-            seg_workers()
-        } else {
-            DEFAULT_UNDISTORT_THREADS
-        }
-    })
-}
-
-/// Which kernel the workers build, and what actually happened.
-struct GpuChoice {
-    /// `None` when the GPU was not asked for, or no device was listed.
-    device: Option<usize>,
-    /// Settled by the first worker to need it; the rest wait rather than each
-    /// repeating gyroflow's error report.
-    verdict: std::sync::OnceLock<bool>,
-}
-
-impl GpuChoice {
-    fn pick(cfg: &PipelineConfig, params: &Option<LensOnlyParams>) -> Self {
-        let device = (cfg.gpu && params.is_some())
-            .then(|| {
-                let devices = crate::undistort::gpu_devices();
-                match devices.first() {
-                    Some(name) => {
-                        log::info!("GPU undistortion on {name}");
-                        Some(0usize)
-                    }
-                    None => {
-                        log::warn!("GPU undistortion: no device found; using the CPU kernel");
-                        None
-                    }
-                }
-            })
-            .flatten();
-        Self {
-            device,
-            verdict: std::sync::OnceLock::new(),
-        }
-    }
-
-    fn undistorter(
-        &self,
-        params: &LensOnlyParams,
-        interp: crate::undistort::Interp,
-    ) -> Undistorter {
-        let gpu = self.device.filter(|&d| {
-            *self
-                .verdict
-                .get_or_init(|| crate::undistort::gpu_usable(params, interp, d))
-        });
-        match gpu {
-            Some(d) => Undistorter::new_gpu(params, interp, d),
-            None => Undistorter::new(params, interp),
-        }
-    }
-
-    /// An unset verdict means no worker ever asked, so nothing rendered on it.
-    fn was_used(&self) -> bool {
-        self.device.is_some() && self.verdict.get().copied().unwrap_or(false)
-    }
+struct StageOutcome {
+    decoded: u64,
+    kept: Vec<u64>,
 }
 
 /// The serial half of the stage. Workers finish out of order, but masking can
@@ -260,18 +181,21 @@ struct Serial {
 }
 
 impl Stage<'_> {
-    /// Returns the frames decoded, the indices kept, and whether the GPU kernel ran.
     fn run(
         &self,
-        decoder: &Decoder,
+        source: &impl FrameSource,
         selector: &mut dyn Selector,
         totals: &Totals,
         progress: &mut dyn FnMut(Progress),
-    ) -> Result<(u64, Vec<u64>, bool)> {
+    ) -> Result<StageOutcome> {
         let cfg = self.run.cfg;
-        let (clip, mask_cfg) = (self.clip, self.mask_cfg);
-        let workers = worker_count(cfg, mask_cfg);
-        let gpu = GpuChoice::pick(cfg, self.params);
+        let workers = super::threads(cfg.undistort_threads, || {
+            if self.mask.runs_inference() {
+                seg_workers()
+            } else {
+                DEFAULT_UNDISTORT_THREADS
+            }
+        });
         let mut serial = Serial::default();
 
         std::thread::scope(|s| -> Result<()> {
@@ -280,21 +204,19 @@ impl Stage<'_> {
             // One slot per worker plus slack: deeper queueing adds no overlap, and a seg run's ~20 workers each hold a whole output frame.
             let (ptx, prx) = crossbeam_channel::bounded::<Result<Processed>>(workers + 2);
             {
-                let cancel = self.run.cancel;
+                let (clip, cancel) = (self.clip, self.run.cancel);
                 let feeder_ptx = ptx.clone();
-                s.spawn(move || feed(decoder, clip, cancel, &ftx, &feeder_ptx));
+                s.spawn(move || feed(source, clip, cancel, &ftx, &feeder_ptx));
             }
-            let gpu = &gpu;
             for _ in 0..workers {
                 let frx = frx.clone();
                 let ptx = ptx.clone();
-                let params = self.params;
-                let out = self.out;
                 s.spawn(move || {
-                    let mut undistorter = params.as_ref().map(|p| gpu.undistorter(p, cfg.interp));
-                    for mut frame in frx.iter() {
-                        let res =
-                            process_frame(&mut frame, undistorter.as_mut(), clip, out, mask_cfg);
+                    let mut undistorter = self
+                        .params
+                        .map(|p| Undistorter::new(p, cfg.interp, self.run.gpu));
+                    for frame in frx.iter() {
+                        let res = self.process_frame(frame, undistorter.as_mut());
                         let failed = res.is_err();
                         if ptx.send(res).is_err() || failed {
                             break;
@@ -308,16 +230,21 @@ impl Stage<'_> {
             let outcome = self.consume(&mut serial, &prx, selector, totals, progress);
             // Nothing else drains this queue, so an early exit strands every worker on a send.
             if outcome.is_err() {
-                decoder.cancel();
+                source.cancel();
                 for _ in prx.iter() {}
             }
             outcome
         })?;
 
+        // A cancelled decode ends quietly: flushing the selector would still write the last window,
+        // and recording a truncated clip is one `--resume` skips forever.
+        self.run.cancel.check()?;
         let decisions = selector.finish()?;
-        self.emitter
-            .emit(decisions, &mut serial.pending, &mut serial.kept)?;
-        Ok((serial.decoded, serial.kept, gpu.was_used()))
+        self.emit(decisions, &mut serial)?;
+        Ok(StageOutcome {
+            decoded: serial.decoded,
+            kept: serial.kept,
+        })
     }
 
     /// Take processed frames as they land and put them back into decode order,
@@ -330,7 +257,7 @@ impl Stage<'_> {
         totals: &Totals,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<()> {
-        let mut smoother = self.mask_cfg.smoother();
+        let mut smoother = self.mask.smoother();
         for processed in prx.iter() {
             if self.run.cancel.is_cancelled() {
                 return Err(Cancelled.into());
@@ -343,19 +270,21 @@ impl Stage<'_> {
                 // In decode order, so neither masking nor selection can depend on which worker won a race.
                 let mut gray = p.gray;
                 let seg = p.seg.map(|labels| smoother.push(labels));
-                let (mask, sharpness) =
-                    mask_and_sharpness(self.mask_cfg, &p.small, &mut gray, seg.as_ref());
+                let judged = self.mask.judge(&p.small, &mut gray, seg.as_ref());
 
-                serial
-                    .pending
-                    .insert(p.index, PendingFrame { rgb: p.rgb, mask });
+                serial.pending.insert(
+                    p.index,
+                    PendingFrame {
+                        rgb: p.rgb,
+                        mask: judged.mask,
+                    },
+                );
                 let decisions = selector.push(FrameInfo {
                     index: p.index,
-                    sharpness,
+                    sharpness: judged.sharpness,
                     gray,
                 });
-                self.emitter
-                    .emit(decisions, &mut serial.pending, &mut serial.kept)?;
+                self.emit(decisions, serial)?;
 
                 serial.decoded += 1;
                 progress(self.progress(totals, serial.decoded, serial.kept.len()));
@@ -367,6 +296,60 @@ impl Stage<'_> {
             self.clip.path.display(),
             serial.next_emit
         );
+        Ok(())
+    }
+
+    /// One frame's work off the serial path: output pixels, then the metric thumbnail.
+    fn process_frame(
+        &self,
+        frame: RawFrame,
+        undistorter: Option<&mut Undistorter>,
+    ) -> Result<Processed> {
+        let rgb = render_output(frame.rgb, self.out, undistorter)?;
+        let a = analyze_frame(&rgb, self.mask)?;
+        Ok(Processed {
+            index: frame.index,
+            rgb,
+            small: a.small,
+            gray: a.gray,
+            seg: a.seg,
+        })
+    }
+
+    /// The only part that knows about file names, mask scaling and the encoder pool.
+    fn emit(&self, decisions: Vec<Decision>, serial: &mut Serial) -> Result<()> {
+        let cfg = self.run.cfg;
+        for d in decisions {
+            let frame = serial
+                .pending
+                .remove(&d.index)
+                .context("selector decided on an unknown frame")?;
+            if !d.keep {
+                continue;
+            }
+            serial.kept.push(d.index);
+            let name = super::manifest::image_name(&self.clip.stem, d.index, cfg.format);
+            let masks = match frame.mask {
+                // One sidecar per consumer, scaled to output size only now.
+                Some(set) => {
+                    let sidecar = |dir: &std::path::Path, m: &Mask| MaskWrite {
+                        path: dir.join(format!("{name}.png")),
+                        gray: m.scaled_to(self.out).data,
+                    };
+                    let mut out = vec![sidecar(&self.run.mask_dirs.sfm, &set.sfm)];
+                    if let (Some(dir), Some(m)) = (&self.run.mask_dirs.training, &set.training) {
+                        out.push(sidecar(dir, m));
+                    }
+                    out
+                }
+                None => vec![],
+            };
+            self.run.writers.submit(WriteJob {
+                path: cfg.out_dir.join(&name),
+                rgb: frame.rgb,
+                masks,
+            })?;
+        }
         Ok(())
     }
 
@@ -389,26 +372,24 @@ impl Stage<'_> {
 
 /// A mid-clip frame size change would silently corrupt the undistort geometry.
 fn feed(
-    decoder: &Decoder,
+    source: &impl FrameSource,
     clip: &ClipInfo,
     cancel: &CancelToken,
     ftx: &crossbeam_channel::Sender<RawFrame>,
     err_tx: &crossbeam_channel::Sender<Result<Processed>>,
 ) {
-    for frame in decoder.frames() {
+    for frame in source.frames() {
         if cancel.is_cancelled() {
-            decoder.cancel();
+            source.cancel();
             break;
         }
         let checked = frame.and_then(|f| {
-            if (f.width, f.height) != (clip.width, clip.height) {
+            if f.rgb.size() != clip.size {
                 bail!(
-                    "{}: frame size {}x{} does not match probed {}x{}",
+                    "{}: frame size {} does not match probed {}",
                     clip.path.display(),
-                    f.width,
-                    f.height,
-                    clip.width,
-                    clip.height
+                    f.rgb.size(),
+                    clip.size
                 );
             }
             Ok(f)
@@ -429,124 +410,167 @@ fn feed(
 
 /// The undistort kernel renders straight at the output size, fusing the downscale.
 pub fn render_output(
-    rgb: &mut Vec<u8>,
-    (in_w, in_h): (u32, u32),
-    (out_w, out_h): (usize, usize),
+    mut frame: Rgb8,
+    out: Size,
     undistorter: Option<&mut Undistorter>,
-) -> Result<Vec<u8>> {
+) -> Result<Rgb8> {
     match undistorter {
-        Some(u) => {
-            let mut out = vec![0u8; out_w * out_h * 3];
-            u.process_rgb(rgb, &mut out)?;
-            Ok(out)
-        }
-        None if (out_w, out_h) == (in_w as usize, in_h as usize) => Ok(std::mem::take(rgb)),
-        None => resize_rgb(rgb, in_w, in_h, out_w as u32, out_h as u32),
+        Some(u) => u.process_rgb(&mut frame),
+        None if frame.size() == out => Ok(frame),
+        None => resize_rgb(&frame, out),
     }
 }
 
 /// The per-frame inputs masking and the selection metrics both run on.
 pub struct FrameAnalysis {
-    /// Metric-resolution RGB thumbnail; `gray` carries its dimensions.
-    pub small: Vec<u8>,
+    /// Metric-resolution RGB thumbnail, the same size as `gray`.
+    pub small: Rgb8,
     pub gray: GrayFrame,
     pub seg: Option<SegLabels>,
 }
 
 /// Inference is the expensive part and is stateless, so it belongs off the serial path.
-pub fn analyze_frame(rgb: &[u8], w: u32, h: u32, mask_cfg: &MaskConfig) -> Result<FrameAnalysis> {
-    let (small, mw, mh) = metric_rgb(rgb, w, h)?;
+pub fn analyze_frame(rgb: &Rgb8, mask: &PreparedMask) -> Result<FrameAnalysis> {
     // The thumbnail outlives `rgb`, so `metric_rgb`'s borrowed case must be copied here.
-    let small = small.into_owned();
-    let gray = rgb_to_gray(&small, mw, mh);
+    let small = metric_rgb(rgb)?.into_owned();
+    let gray = rgb_to_gray(&small);
     // Inference reads the output frame: a person a few dozen pixels tall in the thumbnail is not recoverable by upsampling.
-    let seg = mask_cfg.segment(rgb, w, h)?;
+    let seg = mask.segment(rgb)?;
     Ok(FrameAnalysis { small, gray, seg })
 }
 
-/// The metric sees the SfM set: sharpness and motion are selection questions, not supervision ones, so the sky belongs in it.
-pub fn mask_and_sharpness(
-    mask_cfg: &MaskConfig,
-    small: &[u8],
-    gray: &mut GrayFrame,
-    seg: Option<&SegLabels>,
-) -> (Option<MaskSet>, f64) {
-    let mask = mask_cfg
-        .is_active()
-        .then(|| mask_cfg.compute(small, gray, seg));
-    if let Some(m) = &mask {
-        gray.valid = Some(m.sfm.data.clone());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode::HwAccel;
+    use crate::mask::MaskConfig;
+    use crate::output::ImageFormat;
+    use crate::select::{SelectionConfig, SelectionMode};
+    use crate::undistort::Interp;
+
+    const SIZE: Size = Size::new(32, 24);
+
+    /// Synthetic frames by index and size, so a test can drop one or resize one.
+    struct Frames(Vec<(u64, Size)>);
+
+    fn frames(n: u64) -> Frames {
+        Frames((0..n).map(|i| (i, SIZE)).collect())
     }
-    (mask, laplacian_variance(gray))
-}
 
-/// One frame's work off the serial path: output pixels, then the metric thumbnail.
-fn process_frame(
-    frame: &mut RawFrame,
-    undistorter: Option<&mut Undistorter>,
-    clip: &ClipInfo,
-    out: (usize, usize),
-    mask_cfg: &MaskConfig,
-) -> Result<Processed> {
-    let rgb = render_output(&mut frame.rgb, (clip.width, clip.height), out, undistorter)?;
-    let a = analyze_frame(&rgb, out.0 as u32, out.1 as u32, mask_cfg)?;
-    Ok(Processed {
-        index: frame.index,
-        rgb,
-        small: a.small,
-        gray: a.gray,
-        seg: a.seg,
-    })
-}
-
-/// The only part that knows about file names, mask scaling and the encoder pool.
-struct Emitter<'a> {
-    run: &'a ClipRun<'a>,
-    clip: &'a ClipInfo,
-    out_w: usize,
-    out_h: usize,
-}
-
-impl Emitter<'_> {
-    fn emit(
-        &self,
-        decisions: Vec<Decision>,
-        pending: &mut HashMap<u64, PendingFrame>,
-        kept: &mut Vec<u64>,
-    ) -> Result<()> {
-        let cfg = self.run.cfg;
-        for d in decisions {
-            let frame = pending
-                .remove(&d.index)
-                .context("selector decided on an unknown frame")?;
-            if !d.keep {
-                continue;
-            }
-            kept.push(d.index);
-            let name = super::manifest::image_name(&self.clip.stem, d.index, cfg.format);
-            let masks = match frame.mask {
-                // One sidecar per consumer, scaled to output size only now.
-                Some(set) => {
-                    let sidecar = |dir: &std::path::Path, m: &Mask| MaskWrite {
-                        path: dir.join(format!("{name}.png")),
-                        gray: m.scaled_to(self.out_w as u32, self.out_h as u32).data,
-                    };
-                    let mut out = vec![sidecar(&self.run.mask_dirs.sfm, &set.sfm)];
-                    if let (Some(dir), Some(m)) = (&self.run.mask_dirs.training, &set.training) {
-                        out.push(sidecar(dir, m));
-                    }
-                    out
-                }
-                None => vec![],
-            };
-            self.run.writers.submit(WriteJob {
-                path: cfg.out_dir.join(&name),
-                w: self.out_w as u32,
-                h: self.out_h as u32,
-                rgb: frame.rgb,
-                masks,
-            })?;
+    impl FrameSource for Frames {
+        fn frames(&self) -> impl Iterator<Item = Result<RawFrame>> + '_ {
+            self.0.iter().map(|&(index, size)| {
+                let rgb = Rgb8::new(size, vec![index as u8; size.px() * 3])?;
+                Ok(RawFrame { index, rgb })
+            })
         }
-        Ok(())
+        fn cancel(&self) {}
+    }
+
+    fn run_stage(
+        source: &Frames,
+        cancel: &CancelToken,
+    ) -> (Result<StageOutcome>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PipelineConfig {
+            inputs: vec![],
+            profile_path: None,
+            out_dir: dir.path().to_path_buf(),
+            output_size: super::super::OutputSpec::Same,
+            format: ImageFormat::Png,
+            selection: SelectionConfig {
+                mode: SelectionMode::EveryNth { n: 1 },
+                blur_floor: None,
+            },
+            hwaccel: HwAccel::Auto,
+            ffmpeg_path: None,
+            interp: Interp::Bilinear,
+            gpu: false,
+            mask: MaskConfig::default(),
+            writer_threads: 1,
+            // Several workers, so frames really do finish out of order.
+            undistort_threads: 4,
+            resume: false,
+            frames_from: None,
+        };
+        let ff = Ffmpeg {
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: None,
+            version: String::new(),
+        };
+        let writers = WriterPool::new(cfg.format, 1).unwrap();
+        let run = ClipRun {
+            cfg: &cfg,
+            ff: &ff,
+            writers: &writers,
+            mask_dirs: MaskDirs {
+                sfm: dir.path().join("masks"),
+                training: None,
+            },
+            n_clips: 1,
+            t0: Instant::now(),
+            cancel,
+            lens: None,
+            gpu: None,
+        };
+        let clip = ClipInfo {
+            path: "synthetic.mkv".into(),
+            stem: "synthetic".into(),
+            size: SIZE,
+            fps: 30.0,
+            frames: None,
+            codec: None,
+            duration_s: None,
+        };
+        let mask = cfg.mask.prepare(SIZE).unwrap();
+        let stage = Stage {
+            run: &run,
+            clip_idx: 0,
+            clip: &clip,
+            out: SIZE,
+            params: None,
+            mask: &mask,
+        };
+        let mut selector = make_selector(&cfg.selection, None).unwrap();
+        let outcome = stage.run(source, &mut *selector, &Totals::default(), &mut |_| {});
+        writers.finish().unwrap();
+        (outcome, dir)
+    }
+
+    fn stage_error(source: &Frames) -> String {
+        let (outcome, _dir) = run_stage(source, &CancelToken::new());
+        outcome.err().expect("the stage must fail").to_string()
+    }
+
+    #[test]
+    fn every_frame_comes_out_in_decode_order() {
+        let (outcome, dir) = run_stage(&frames(40), &CancelToken::new());
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.decoded, 40);
+        assert_eq!(outcome.kept, (0..40).collect::<Vec<_>>());
+        assert!(dir.path().join("synthetic_000039.png").is_file());
+    }
+
+    #[test]
+    fn a_missing_frame_is_reported_as_a_gap() {
+        let mut source = frames(10);
+        source.0.remove(4);
+        assert!(stage_error(&source).contains("gap at index 4"));
+    }
+
+    #[test]
+    fn a_frame_of_the_wrong_size_fails_the_clip() {
+        let mut source = frames(10);
+        source.0[3].1 = Size::new(64, 24);
+        assert!(stage_error(&source).contains("does not match probed"));
+    }
+
+    #[test]
+    fn a_cancelled_stage_writes_nothing_and_says_so() {
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let (outcome, dir) = run_stage(&frames(10), &cancel);
+        assert!(crate::cancel::is_cancelled(&outcome.err().unwrap()));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

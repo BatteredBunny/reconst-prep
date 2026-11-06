@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
-use crate::USER_AGENT;
 use crate::paths::hex;
 
 /// A stalled connection should fail rather than hold the picker open forever.
@@ -49,7 +48,6 @@ pub const CATALOGUE: &[CatalogueEntry] = &[CatalogueEntry {
              (ONNX export of nvidia/segformer-b0-finetuned-ade-512-512)",
 }];
 
-/// `~/.cache/reconst-prep/models` or the platform equivalent.
 pub fn cache_dir() -> Result<PathBuf> {
     crate::paths::cache_dir("models")
 }
@@ -116,40 +114,35 @@ pub fn fetch(
         entry.size_mb(),
         entry.url
     );
-    let response = ureq::get(entry.url)
-        .header("User-Agent", USER_AGENT)
-        .config()
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .call()
-        .with_context(|| format!("fetching {}", entry.url))?;
+    let response = crate::http_get(entry.url, TIMEOUT)?;
 
     // Renamed into place only after the hash matches, so a partial write can never look like a finished model.
     let tmp = dest.with_extension("onnx.part");
-    let mut out =
-        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let mut reader = response.into_body().into_reader();
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 128 * 1024];
-    let mut done: u64 = 0;
-    loop {
-        if cancel.is_cancelled() {
-            let _ = std::fs::remove_file(&tmp);
-            bail!("cancelled");
+    let download = || -> Result<String> {
+        let mut out =
+            std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        let mut reader = response.into_body().into_reader();
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 128 * 1024];
+        let mut done: u64 = 0;
+        loop {
+            cancel.check()?;
+            let n = reader.read(&mut buf).context("reading the download")?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n]).context("writing the download")?;
+            done += n as u64;
+            progress(done, entry.bytes);
         }
-        let n = reader.read(&mut buf).context("reading the download")?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        out.write_all(&buf[..n]).context("writing the download")?;
-        done += n as u64;
-        progress(done, entry.bytes);
-    }
-    out.flush().ok();
-    drop(out);
-
-    let got = hex(&hasher.finalize());
+        out.flush().context("writing the download")?;
+        Ok(hex(&hasher.finalize()))
+    };
+    // Every way out but a match removes the part file, so none is left to look like progress.
+    let got = download().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
     if got != entry.sha256 {
         let _ = std::fs::remove_file(&tmp);
         bail!(

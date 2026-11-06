@@ -1,4 +1,5 @@
-use reconst_prep_core::undistort::{Interp, LensOnlyParams, undistort_rgb_image};
+use reconst_prep_core::frame::{Rgb8, Size};
+use reconst_prep_core::undistort::{Interp, LensOnlyParams, LensProfileFile, undistort_rgb_image};
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 
@@ -216,17 +217,24 @@ fn psnr(a: &Gray, b: &Gray) -> f64 {
 }
 
 /// Loads the vendored lens profile, source frame, and app-export reference.
-fn fixture() -> (LensOnlyParams, image::RgbImage, Gray) {
+fn fixture() -> (LensOnlyParams, Rgb8, Gray) {
     let data = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
     let profile_json =
         std::fs::read_to_string(format!("{data}/dji_o4_pro_stock_white_4k60.json")).unwrap();
     let src = image::open(format!("{data}/golden_src_frame200.png"))
         .unwrap()
         .to_rgb8();
-    let (in_w, in_h) = (src.width() as usize, src.height() as usize);
-    assert_eq!((in_w, in_h), (3840, 2880), "vendored source frame changed?");
+    let size = Size::new(src.width(), src.height());
+    assert_eq!(
+        size,
+        Size::new(3840, 2880),
+        "vendored source frame changed?"
+    );
+    let src = Rgb8::new(size, src.into_raw()).unwrap();
 
-    let params = LensOnlyParams::new(&profile_json, in_w, in_h, 1920, 1080).expect("profile");
+    let params = LensProfileFile::parse(&profile_json)
+        .and_then(|lens| lens.params(size, Size::new(1920, 1080)))
+        .expect("profile");
 
     let reference = load_gray(&format!("{data}/golden_ref_frame200.png"));
     assert_eq!((reference.w, reference.h), (1920, 1080));
@@ -237,13 +245,9 @@ fn fixture() -> (LensOnlyParams, image::RgbImage, Gray) {
 fn golden_frame_matches_gyroflow_app_export() {
     let (params, src, reference) = fixture();
 
-    // None here means someone bypassed LensProfile::from_json, so init() never ran.
-    assert!(
-        params.lens.fisheye_params.radial_distortion_limit.is_some(),
-        "radial_distortion_limit not computed because LensProfile::init() did not run"
-    );
-
-    let out = undistort_rgb_image(&params, Interp::Lanczos4, src.as_raw()).expect("undistort");
+    let out = undistort_rgb_image(&params, Interp::Lanczos4, &src)
+        .expect("undistort")
+        .into_data();
     let ours = rgb_to_gray(&out, 1920, 1080);
 
     // The spike measured 25.7 dB; a single-frame misalignment scores ~21 dB and wrong lens math far less.
@@ -315,7 +319,9 @@ fn interpolation_changes_sharpness_not_geometry() {
     let mut rendered: Vec<(&str, Vec<u8>, f64)> = Vec::new();
     println!("filter     PSNR vs app   median disp   corner scale err   sharpness");
     for interp in [Interp::Lanczos4, Interp::Bicubic, Interp::Bilinear] {
-        let out = undistort_rgb_image(&params, interp, src.as_raw()).expect("undistort");
+        let out = undistort_rgb_image(&params, interp, &src)
+            .expect("undistort")
+            .into_data();
         let ours = rgb_to_gray(&out, 1920, 1080);
         let psnr_db = psnr(&ours, &reference);
         let r = register(&ours, &reference);

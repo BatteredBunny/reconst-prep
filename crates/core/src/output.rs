@@ -3,8 +3,8 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Sender, bounded};
@@ -12,7 +12,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 
-/// Default JPEG quality. Shared by the CLI flag and the GUI setting.
+use crate::frame::{Rgb8, Size};
+
 pub const DEFAULT_JPEG_QUALITY: u8 = 95;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -42,9 +43,7 @@ pub struct MaskWrite {
 
 pub struct WriteJob {
     pub path: PathBuf,
-    pub w: u32,
-    pub h: u32,
-    pub rgb: Vec<u8>,
+    pub rgb: Rgb8,
     /// Zero or more mask sidecars, one per consumer (see `crate::mask::MaskUse`).
     pub masks: Vec<MaskWrite>,
 }
@@ -61,165 +60,168 @@ fn write_png(
         .write_image(data, width, height, color)
 }
 
-fn encode(job: &WriteJob, format: ImageFormat) -> Result<()> {
-    for mask in &job.masks {
-        let file = File::create(&mask.path)
-            .with_context(|| format!("creating {}", mask.path.display()))?;
-        write_png(
-            BufWriter::new(file),
-            &mask.gray,
-            job.w,
-            job.h,
-            ExtendedColorType::L8,
-        )
-        .with_context(|| format!("encoding {}", mask.path.display()))?;
-    }
-    let file =
-        File::create(&job.path).with_context(|| format!("creating {}", job.path.display()))?;
+/// Dropping a `BufWriter` flushes but throws the error away, and a frame whose
+/// last bytes never reached the disk would still be counted and later trusted by `--resume`.
+fn write_file(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> std::result::Result<(), image::ImageError>,
+) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut w = BufWriter::new(file);
-    match format {
-        ImageFormat::Png => {
-            write_png(&mut w, &job.rgb, job.w, job.h, ExtendedColorType::Rgb8)
-                .with_context(|| format!("encoding {}", job.path.display()))?;
-        }
-        ImageFormat::Jpeg { quality } => {
-            JpegEncoder::new_with_quality(&mut w, quality.clamp(1, 100))
-                .write_image(&job.rgb, job.w, job.h, ExtendedColorType::Rgb8)
-                .with_context(|| format!("encoding {}", job.path.display()))?;
+    write(&mut w).with_context(|| format!("encoding {}", path.display()))?;
+    w.into_inner()
+        .map_err(|e| e.into_error())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+fn encode(job: &WriteJob, format: ImageFormat) -> Result<()> {
+    let Size { w, h } = job.rgb.size();
+    let rgb = job.rgb.data();
+    for mask in &job.masks {
+        write_file(&mask.path, |out| {
+            write_png(out, &mask.gray, w, h, ExtendedColorType::L8)
+        })?;
+    }
+    write_file(&job.path, |out| match format {
+        ImageFormat::Png => write_png(out, rgb, w, h, ExtendedColorType::Rgb8),
+        ImageFormat::Jpeg { quality } => JpegEncoder::new_with_quality(out, quality.clamp(1, 100))
+            .write_image(rgb, w, h, ExtendedColorType::Rgb8),
+    })
+}
+
+/// Written count and first failure, behind one lock so a waiter sees both together.
+#[derive(Default)]
+struct Report {
+    written: u64,
+    /// Published as it happens: otherwise a mid-run `submit` could only report a closed queue, hiding the real disk error.
+    failure: Option<String>,
+}
+
+#[derive(Default)]
+struct Shared {
+    report: Mutex<Report>,
+    changed: Condvar,
+}
+
+impl Shared {
+    fn update(&self, f: impl FnOnce(&mut Report)) {
+        f(&mut self.lock());
+        self.changed.notify_all();
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Report> {
+        self.report.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn check(r: &Report) -> Result<()> {
+        match &r.failure {
+            Some(e) => bail!("writing images failed: {e}"),
+            None => Ok(()),
         }
     }
-    Ok(())
+}
+
+/// Runs as its writer unwinds: a panic records no error of its own, and a waiter must not wait on a dead thread.
+struct PanicSignal(Arc<Shared>);
+
+impl Drop for PanicSignal {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.update(|r| {
+                r.failure
+                    .get_or_insert_with(|| "a writer thread panicked".into());
+            });
+        }
+    }
 }
 
 /// `submit` blocks when the queue is full; `finish` joins everything and surfaces the first error.
 pub struct WriterPool {
     tx: Option<Sender<WriteJob>>,
-    handles: Vec<std::thread::JoinHandle<Result<()>>>,
-    written: Arc<AtomicU64>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+    shared: Arc<Shared>,
     /// Counted so [`Self::drain`] knows when the queue has caught up.
     submitted: AtomicU64,
-    /// Published as it happens: otherwise a mid-run `submit` could only report a closed queue, hiding the real disk error.
-    first_err: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl WriterPool {
     pub fn new(format: ImageFormat, threads: usize) -> Result<Self> {
         let threads = threads.max(1);
         let (tx, rx) = bounded::<WriteJob>(threads * 2);
-        let written = Arc::new(AtomicU64::new(0));
-        let first_err: Arc<std::sync::Mutex<Option<String>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let mut handles = Vec::with_capacity(threads);
-        for i in 0..threads {
-            let rx = rx.clone();
-            let written = written.clone();
-            let first_err = first_err.clone();
-            handles.push(
+        let shared = Arc::new(Shared::default());
+        let handles = (0..threads)
+            .map(|i| {
+                let (rx, shared) = (rx.clone(), shared.clone());
                 std::thread::Builder::new()
                     .name(format!("img-writer-{i}"))
-                    .spawn(move || -> Result<()> {
+                    .spawn(move || {
+                        let _signal = PanicSignal(shared.clone());
                         for job in rx.iter() {
                             if let Err(e) = encode(&job, format) {
-                                let mut slot = first_err.lock().unwrap_or_else(|p| p.into_inner());
-                                slot.get_or_insert_with(|| format!("{e:#}"));
-                                return Err(e);
+                                let e = format!("{e:#}");
+                                return shared.update(|r| _ = r.failure.get_or_insert(e));
                             }
-                            written.fetch_add(1, Ordering::Relaxed);
+                            shared.update(|r| r.written += 1);
                         }
-                        Ok(())
                     })
-                    .context("spawning writer thread")?,
-            );
-        }
+                    .context("spawning writer thread")
+            })
+            .collect::<Result<_>>()?;
         Ok(Self {
             tx: Some(tx),
             handles,
-            written,
+            shared,
             submitted: AtomicU64::new(0),
-            first_err,
         })
     }
 
-    /// The first encode failure, if one has happened.
-    fn encode_error(&self) -> Option<String> {
-        self.first_err
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-    }
-
     pub fn submit(&self, job: WriteJob) -> Result<()> {
-        let send = self
-            .tx
-            .as_ref()
-            .expect("pool already finished")
-            .send(job)
-            .is_ok();
-        if send {
+        let tx = self.tx.as_ref().expect("pool already finished");
+        let sent = tx.send(job).is_ok();
+        if sent {
             self.submitted.fetch_add(1, Ordering::Relaxed);
         }
         // The send succeeding is not evidence of health: a worker that died still leaves the others receiving.
-        match self.encode_error() {
-            Some(e) => bail!("writing images failed: {e}"),
-            None if send => Ok(()),
-            None => bail!("writer pool shut down early"),
-        }
+        Shared::check(&self.shared.lock())?;
+        anyhow::ensure!(sent, "writer pool shut down early");
+        Ok(())
     }
 
     /// Block until everything submitted so far is on disk. A clip recorded in
     /// the manifest while its images are still queued is one `--resume` will
     /// skip, so the record must never run ahead of the files.
     pub fn drain(&self) -> Result<()> {
-        // A worker that panics stops counting without recording an error, so
-        // the wait is bounded rather than trusting the count to converge.
-        const STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
-        let mut last_progress = std::time::Instant::now();
-        let mut seen = self.written();
-        while self.written() < self.submitted.load(Ordering::Relaxed) {
-            if let Some(e) = self.encode_error() {
-                bail!("writing images failed: {e}");
+        let submitted = self.submitted.load(Ordering::Relaxed);
+        let mut report = self.shared.lock();
+        loop {
+            Shared::check(&report)?;
+            if report.written >= submitted {
+                return Ok(());
             }
-            let now = self.written();
-            if now != seen {
-                seen = now;
-                last_progress = std::time::Instant::now();
-            } else if last_progress.elapsed() > STALL_LIMIT {
-                bail!(
-                    "image writing stalled with {} jobs outstanding",
-                    self.submitted.load(Ordering::Relaxed) - now
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        match self.encode_error() {
-            Some(e) => bail!("writing images failed: {e}"),
-            None => Ok(()),
+            report = self
+                .shared
+                .changed
+                .wait(report)
+                .unwrap_or_else(|p| p.into_inner());
         }
     }
 
     pub fn written(&self) -> u64 {
-        self.written.load(Ordering::Relaxed)
+        self.shared.lock().written
     }
 
-    /// Close the queue, join all writers, return total frames written.
     pub fn finish(mut self) -> Result<u64> {
-        drop(self.tx.take()); // workers drain and exit
-        let mut first_err = None;
+        self.close();
+        Shared::check(&self.shared.lock())?;
+        Ok(self.written())
+    }
+
+    fn close(&mut self) {
+        drop(self.tx.take());
         for h in self.handles.drain(..) {
-            match h.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    first_err.get_or_insert(e);
-                }
-                Err(_) => {
-                    first_err.get_or_insert(anyhow::anyhow!("writer thread panicked"));
-                }
-            }
+            let _ = h.join();
         }
-        if let Some(e) = first_err {
-            bail!(e);
-        }
-        Ok(self.written.load(Ordering::Relaxed))
     }
 }
 
@@ -227,9 +229,46 @@ impl Drop for WriterPool {
     /// A cancelled or failed run drops the pool instead of calling `finish`;
     /// without this the process can exit with encoders still mid-write.
     fn drop(&mut self) {
-        drop(self.tx.take());
-        for h in self.handles.drain(..) {
-            let _ = h.join();
+        self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(path: PathBuf) -> WriteJob {
+        WriteJob {
+            path,
+            rgb: Rgb8::new(Size::new(4, 2), vec![128; 4 * 2 * 3]).unwrap(),
+            masks: vec![],
         }
+    }
+
+    #[test]
+    fn drain_returns_once_everything_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = WriterPool::new(ImageFormat::Png, 3).unwrap();
+        for i in 0..20 {
+            pool.submit(job(dir.path().join(format!("{i}.png"))))
+                .unwrap();
+        }
+        pool.drain().unwrap();
+        assert_eq!(pool.written(), 20);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 20);
+        assert_eq!(pool.finish().unwrap(), 20);
+    }
+
+    #[test]
+    fn a_write_error_reaches_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = WriterPool::new(ImageFormat::Png, 1).unwrap();
+        pool.submit(job(dir.path().join("missing-dir/0.png")))
+            .unwrap();
+        let e = pool.drain().expect_err("the directory does not exist");
+        assert!(
+            e.to_string().contains("writing images failed"),
+            "unhelpful: {e}"
+        );
     }
 }

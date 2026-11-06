@@ -33,7 +33,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
 
             let row = |ui: &mut egui::Ui, key: &str, value: String| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(key).weak().size(11.0));
+                    ui.label(crate::widgets::caption(key));
                     ui.label(mono(value).size(11.0));
                 });
             };

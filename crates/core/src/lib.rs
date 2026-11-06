@@ -2,6 +2,7 @@
 
 pub mod cancel;
 pub mod decode;
+pub mod frame;
 pub mod gray;
 pub mod mask;
 pub mod models;
@@ -21,6 +22,21 @@ pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Sent with every outbound HTTP request (GitHub rejects requests without one).
 pub const USER_AGENT: &str = concat!("reconst-prep/", env!("CARGO_PKG_VERSION"));
+
+/// Every network request goes through here, so none goes out without the user agent GitHub insists on, or without a timeout.
+pub(crate) fn http_get(
+    url: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    use anyhow::Context as _;
+    ureq::get(url)
+        .header("User-Agent", USER_AGENT)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
+        .call()
+        .with_context(|| format!("fetching {url}"))
+}
 
 #[cfg(test)]
 mod tests {

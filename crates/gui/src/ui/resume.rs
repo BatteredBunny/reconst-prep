@@ -44,7 +44,7 @@ pub fn window(app: &mut App, ui_state: &mut Prompt, ctx: &egui::Context) {
                 ),
                 None => format!("started{}", ago(run.started_unix)),
             };
-            ui.label(egui::RichText::new(detail).weak().size(11.0));
+            ui.label(crate::widgets::caption(detail));
             ui.add_space(10.0);
             ui.label(
                 egui::RichText::new(
@@ -103,10 +103,7 @@ enum Choice {
 
 /// " · 2 hours ago", or nothing if the clock disagrees with itself.
 fn ago(started_unix: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = reconst_prep_core::paths::unix_now();
     let Some(secs) = now.checked_sub(started_unix).filter(|s| *s > 0) else {
         return String::new();
     };

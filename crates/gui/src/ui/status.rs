@@ -86,7 +86,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     ui.label(&e.message);
                 }
                 Some(Err(_)) => {
-                    ui.colored_label(ui.visuals().warn_fg_color, icons::PROBLEM);
+                    crate::widgets::warn_icon(ui);
                     ui.label(mono(format!("cancelled  ·  {done}")));
                 }
                 _ => {
@@ -106,7 +106,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 target,
                 crate::theme::MOTION_S,
             );
-            let fps_target = (p.decoded_this_run as f64 / p.elapsed_s.max(1e-9)) as f32;
+            let fps_target = p.decode_fps() as f32;
             let fps = ctx.animate_value_with_time(egui::Id::unique("fps"), fps_target, 0.4);
             let eta = match p.clip_eta_s(fps as f64) {
                 Some(left) => format!("{} left in clip", crate::widgets::mmss(left)),
@@ -128,8 +128,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     p.clip_name
                 )));
                 ui.label(mono(format!(
-                    "{:.1} fps · {} kept / {} decoded · {} written  {eta}",
-                    fps, p.total_kept, p.total_decoded, p.total_written
+                    "{fps:.1} fps  ·  {}  {eta}",
+                    totals_line(p.total_kept, p.total_decoded, p.total_written)
                 )));
             });
             ui.add_space(4.0);

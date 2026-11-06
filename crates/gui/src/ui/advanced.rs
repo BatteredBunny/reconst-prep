@@ -4,11 +4,12 @@ use eframe::egui;
 
 use crate::App;
 use crate::icons;
-use crate::widgets::{category, combo};
+use crate::widgets::{Category, combo};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let icon = icons::ADVANCED;
-    category(ui, "cat_advanced", icon, "Advanced", None, false, |ui| {
-        combo(ui, "hardware decode", &mut app.cfg.hwaccel);
-    });
+    Category::new("cat_advanced", icons::ADVANCED, "Advanced")
+        .collapsed()
+        .show(ui, |ui| {
+            combo(ui, "hardware decode", &mut app.cfg.hwaccel);
+        });
 }

@@ -2,7 +2,11 @@
 
 use anyhow::Result;
 
-use crate::gray::{GrayFrame, nn_scale};
+use std::sync::Arc;
+
+use crate::frame::{Rgb8, Size};
+use crate::gray::{GrayFrame, laplacian_variance, nn_scale};
+use crate::seg::{SegLabels, SegModel, SegSmoother};
 
 mod sky;
 
@@ -11,21 +15,18 @@ pub use sky::{SkyParams, sky_mask};
 /// Per-pixel validity, `0` = ignore: COLMAP's convention, so the PNG needs no inversion.
 #[derive(Clone)]
 pub struct Mask {
-    pub w: u32,
-    pub h: u32,
+    pub size: Size,
     pub data: Vec<u8>,
 }
 
 impl Mask {
-    pub fn all_valid(w: u32, h: u32) -> Self {
+    pub fn all_valid(size: Size) -> Self {
         Self {
-            w,
-            h,
-            data: vec![255; (w as usize) * (h as usize)],
+            size,
+            data: vec![255; size.px()],
         }
     }
 
-    /// Fraction of pixels still usable, 0..1.
     pub fn valid_fraction(&self) -> f64 {
         if self.data.is_empty() {
             return 1.0;
@@ -35,19 +36,18 @@ impl Mask {
     }
 
     /// Nearest-neighbour scale, for the reason spelled out on `nn_scale`.
-    pub fn scaled_to(&self, w: u32, h: u32) -> Mask {
-        if (w, h) == (self.w, self.h) {
+    pub fn scaled_to(&self, size: Size) -> Mask {
+        if size == self.size {
             return self.clone();
         }
         Mask {
-            w,
-            h,
-            data: nn_scale(&self.data, self.w, self.h, w, h),
+            size,
+            data: nn_scale(&self.data, self.size, size),
         }
     }
 
     fn intersect(&mut self, other: &Mask) {
-        debug_assert_eq!((self.w, self.h), (other.w, other.h));
+        debug_assert_eq!(self.size, other.size);
         for (a, b) in self.data.iter_mut().zip(&other.data) {
             if *b == 0 {
                 *a = 0;
@@ -60,7 +60,7 @@ impl Mask {
         if r == 0 {
             return;
         }
-        let (w, h, r) = (self.w as usize, self.h as usize, r as usize);
+        let ((w, h), r) = (self.size.as_usize(), r as usize);
         // One scratch buffer, swapped between the passes.
         let mut scratch = self.data.clone();
         for y in 0..h {
@@ -105,16 +105,34 @@ pub enum MaskUse {
     SfmAndTraining,
 }
 
+/// Sidecar names as the manifest spells them; the directories are [`SFM_MASK_DIR`] and [`TRAINING_MASK_DIR`].
+const SFM_SIDECAR: &str = "sfm";
+const TRAINING_SIDECAR: &str = "training";
+
 impl MaskUse {
     fn sidecars(self) -> &'static [&'static str] {
         match self {
-            MaskUse::SfmOnly => &["sfm"],
-            MaskUse::SfmAndTraining => &["sfm", "training"],
+            MaskUse::SfmOnly => &[SFM_SIDECAR],
+            MaskUse::SfmAndTraining => &[SFM_SIDECAR, TRAINING_SIDECAR],
         }
     }
 }
 
-/// One thing that can be masked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskSource {
+    Segmentation,
+    Heuristic,
+}
+
+impl MaskSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            MaskSource::Segmentation => "segmentation",
+            MaskSource::Heuristic => "heuristic",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaskClass {
     Sky,
@@ -138,10 +156,14 @@ impl MaskClass {
         }
     }
 
-    fn manifest_entry(self, source: &str, params: Option<serde_json::Value>) -> ManifestMaskClass {
+    fn manifest_entry(
+        self,
+        source: MaskSource,
+        params: Option<serde_json::Value>,
+    ) -> ManifestMaskClass {
         ManifestMaskClass {
             name: self.name().into(),
-            source: source.into(),
+            source: source.name().into(),
             written_to: self
                 .use_()
                 .sidecars()
@@ -169,29 +191,18 @@ pub struct SegRequest {
     pub cfg: crate::seg::SegConfig,
 }
 
-/// Which sources are switched on, as three independent flags.
-#[derive(Clone, Copy)]
-struct Active {
-    seg_sky: bool,
-    seg_people: bool,
-    heuristic_sky: bool,
-}
-
-/// What masking to apply; `None` fields are off.
-#[derive(Debug, Clone, Default)]
+/// What masking to apply; `None` fields are off. Opening the model is [`MaskConfig::prepare`]'s job.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MaskConfig {
     /// Heuristic sky parameters, ignored when a model is asked for sky.
     pub sky: Option<SkyParams>,
     pub seg: Option<SegRequest>,
-    /// Set by `prepare`; shared across workers because inference is stateless.
-    pub model: Option<std::sync::Arc<crate::seg::SegModel>>,
 }
 
-/// `model` is out: an opened model is a consequence of `seg`, never a difference from it.
-impl PartialEq for MaskConfig {
-    fn eq(&self, other: &Self) -> bool {
-        (&self.sky, &self.seg) == (&other.sky, &other.seg)
-    }
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MaskSourceError {
+    #[error("people masking needs a segmentation model")]
+    PeopleWithoutModel,
 }
 
 /// What a frontend asks for, before the decision tree turns it into a `MaskConfig`.
@@ -210,7 +221,7 @@ pub struct MaskSources {
 
 impl MaskConfig {
     /// The one masking decision tree, shared by CLI and GUI.
-    pub fn from_sources(sources: MaskSources) -> Self {
+    pub fn from_sources(sources: MaskSources) -> Result<Self, MaskSourceError> {
         let MaskSources {
             mask_sky,
             sky_heuristic,
@@ -220,19 +231,21 @@ impl MaskConfig {
             seg_width,
             temporal_window,
         } = sources;
+        if people_class.is_some() && model.is_none() {
+            return Err(MaskSourceError::PeopleWithoutModel);
+        }
         let cfg = crate::seg::SegConfig {
             width: seg_width,
             sky: (mask_sky && model.is_some()).then_some(sky_class),
             people: people_class,
             temporal_window,
         };
-        Self {
+        Ok(Self {
             sky: (mask_sky && model.is_none()).then_some(sky_heuristic),
             seg: model
                 .filter(|_| cfg.is_active())
                 .map(|model_path| SegRequest { model_path, cfg }),
-            model: None,
-        }
+        })
     }
 }
 
@@ -277,158 +290,71 @@ fn manifest_params<T: serde::Serialize>(params: Option<T>) -> Option<serde_json:
 
 impl std::fmt::Debug for Mask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Mask({}x{})", self.w, self.h)
+        write!(f, "Mask({})", self.size)
     }
 }
 
 impl MaskConfig {
-    /// Read off the fields rather than `classes()`, which allocates on the per-frame path.
-    pub fn is_active(&self) -> bool {
-        let a = self.active();
-        a.seg_sky || a.seg_people || a.heuristic_sky
-    }
-
-    /// Which sources are switched on, without the allocation `classes_with_source`
-    /// needs. One derivation, so the per-frame predicates and the class list
-    /// cannot answer differently.
-    fn active(&self) -> Active {
-        let seg = self.seg.as_ref();
-        let seg_sky = seg.is_some_and(|s| s.cfg.sky.is_some());
-        Active {
-            seg_sky,
-            seg_people: seg.is_some_and(|s| s.cfg.people.is_some()),
+    /// The active classes and how each was detected, in the order applied.
+    /// Every other predicate reads from this, so none can disagree with it.
+    pub fn sources(&self) -> impl Iterator<Item = (MaskClass, MaskSource)> + '_ {
+        let seg = self.seg.as_ref().map(|s| &s.cfg);
+        let seg_sky = seg.is_some_and(|c| c.sky.is_some());
+        [
+            seg_sky.then_some((MaskClass::Sky, MaskSource::Segmentation)),
+            seg.and_then(|c| c.people)
+                .map(|_| (MaskClass::People, MaskSource::Segmentation)),
             // The model wins over the heuristic whenever one is asked for sky.
-            heuristic_sky: self.sky.is_some() && !seg_sky,
-        }
+            (self.sky.is_some() && !seg_sky).then_some((MaskClass::Sky, MaskSource::Heuristic)),
+        ]
+        .into_iter()
+        .flatten()
     }
 
-    /// Only the frame aspect matters here; the inference size is `SegConfig::width`.
-    pub fn prepare(&self, frame_w: u32, frame_h: u32) -> Result<Self> {
-        let mut out = self.clone();
-        out.model = match &self.seg {
-            Some(req) if req.cfg.is_active() => Some(std::sync::Arc::new(
-                crate::seg::SegModel::load(&req.model_path, &req.cfg, frame_w, frame_h)?,
-            )),
-            _ => None,
-        };
-        Ok(out)
+    pub fn is_active(&self) -> bool {
+        self.sources().next().is_some()
     }
 
     /// An absent `masks_train/` says "no exclusions apply", which an all-valid mask does not.
     pub fn has_training_class(&self) -> bool {
-        // People is the only class whose `MaskUse` admits a trainer.
-        self.active().seg_people
+        self.sources()
+            .any(|(c, _)| c.use_() == MaskUse::SfmAndTraining)
     }
 
-    /// Stateless, so safe to call from the parallel workers.
-    pub fn segment(&self, rgb: &[u8], w: u32, h: u32) -> Result<Option<crate::seg::SegLabels>> {
-        match (&self.seg, &self.model) {
-            (Some(req), Some(model)) if req.cfg.is_active() => model.labels(rgb, w, h).map(Some),
-            (Some(req), None) if req.cfg.is_active() => {
-                anyhow::bail!("segmentation was requested but MaskConfig::prepare was never called")
+    /// Only the frame aspect matters here; the inference size is `SegConfig::width`.
+    pub fn prepare(&self, frame: Size) -> Result<PreparedMask> {
+        let model = match &self.seg {
+            Some(req) if req.cfg.is_active() => {
+                Some(Arc::new(SegModel::load(&req.model_path, &req.cfg, frame)?))
             }
-            _ => Ok(None),
-        }
+            _ => None,
+        };
+        Ok(PreparedMask {
+            cfg: self.clone(),
+            frame,
+            model,
+        })
     }
 
-    /// Driven from the serial stage so masks never depend on thread scheduling.
-    pub fn smoother(&self) -> crate::seg::SegSmoother {
-        crate::seg::SegSmoother::new(
-            self.seg
-                .as_ref()
-                .map(|s| s.cfg.temporal_window)
-                .unwrap_or(1),
-        )
-    }
-
-    /// `rgb`/`gray` are the metric thumbnail reused from the metrics; `seg` is already smoothed.
-    pub fn compute(
-        &self,
-        rgb: &[u8],
-        gray: &GrayFrame,
-        seg: Option<&crate::seg::SegLabels>,
-    ) -> MaskSet {
-        let mut sfm = Mask::all_valid(gray.w, gray.h);
-        let mut training = self
-            .has_training_class()
-            .then(|| Mask::all_valid(gray.w, gray.h));
-
-        for (class, layer) in self.class_layers(rgb, gray, seg) {
-            sfm.intersect(&layer);
-            if class.use_() == MaskUse::SfmAndTraining
-                && let Some(t) = &mut training
-            {
-                t.intersect(&layer);
-            }
-        }
-        MaskSet { sfm, training }
-    }
-
-    /// Kept per class for the GUI overlay, which must say *which* source removed a pixel.
-    pub fn class_layers(
-        &self,
-        rgb: &[u8],
-        gray: &GrayFrame,
-        seg: Option<&crate::seg::SegLabels>,
-    ) -> Vec<(MaskClass, Mask)> {
-        let mut out = Vec::new();
-        if let (Some(model), Some(labels)) = (&self.model, seg) {
-            out.extend(
-                model
-                    .masks(labels)
-                    .into_iter()
-                    .map(|(class, m)| (class, m.scaled_to(gray.w, gray.h))),
-            );
-        }
-        if let Some(p) = self.sky.filter(|_| self.active().heuristic_sky) {
-            out.push((MaskClass::Sky, sky_mask(rgb, gray, p)));
-        }
-        out
-    }
-
-    /// The active classes and how each was detected, in the order applied.
-    pub fn classes_with_source(&self) -> Vec<(MaskClass, &'static str)> {
-        let a = self.active();
-        let mut out = Vec::new();
-        if a.seg_sky {
-            out.push((MaskClass::Sky, "segmentation"));
-        }
-        if a.seg_people {
-            out.push((MaskClass::People, "segmentation"));
-        }
-        if a.heuristic_sky {
-            out.push((MaskClass::Sky, "heuristic"));
-        }
-        out
-    }
-
-    /// The active classes, in the order they are applied.
-    pub fn classes(&self) -> Vec<MaskClass> {
-        self.classes_with_source()
-            .into_iter()
-            .map(|(c, _)| c)
-            .collect()
-    }
-
-    /// The manifest's account of what was masked and where it was written.
     pub fn describe(&self) -> ManifestMasking {
         let seg_cfg = self.seg.as_ref().map(|s| &s.cfg);
         let classes = self
-            .classes_with_source()
-            .into_iter()
+            .sources()
             .map(|(c, source)| {
                 let params = match (c, source) {
-                    (MaskClass::Sky, "heuristic") => manifest_params(self.sky),
-                    (MaskClass::Sky, _) => manifest_params(seg_cfg.and_then(|s| s.sky)),
+                    (MaskClass::Sky, MaskSource::Heuristic) => manifest_params(self.sky),
+                    (MaskClass::Sky, MaskSource::Segmentation) => {
+                        manifest_params(seg_cfg.and_then(|s| s.sky))
+                    }
                     (MaskClass::People, _) => manifest_params(seg_cfg.and_then(|s| s.people)),
                 };
                 c.manifest_entry(source, params)
             })
             .collect();
         let mut sidecars = std::collections::BTreeMap::new();
-        sidecars.insert("sfm".to_string(), SFM_MASK_DIR.to_string());
+        sidecars.insert(SFM_SIDECAR.to_string(), SFM_MASK_DIR.to_string());
         if self.has_training_class() {
-            sidecars.insert("training".to_string(), TRAINING_MASK_DIR.to_string());
+            sidecars.insert(TRAINING_SIDECAR.to_string(), TRAINING_MASK_DIR.to_string());
         }
         ManifestMasking {
             sidecars,
@@ -438,25 +364,146 @@ impl MaskConfig {
     }
 }
 
+/// A [`MaskConfig`] with its model opened. Only this can produce masks, so forgetting `prepare` does not compile.
+#[derive(Clone)]
+pub struct PreparedMask {
+    cfg: MaskConfig,
+    /// The geometry the model was opened for.
+    frame: Size,
+    /// Shared across workers because inference is stateless.
+    model: Option<Arc<SegModel>>,
+}
+
+pub struct FrameJudgement {
+    pub mask: Option<MaskSet>,
+    /// Per class, at metric resolution, for the GUI overlay; the pipeline ignores them.
+    pub layers: Vec<(MaskClass, Mask)>,
+    pub sharpness: f64,
+}
+
+impl PreparedMask {
+    pub fn config(&self) -> &MaskConfig {
+        &self.cfg
+    }
+
+    /// Opening a model reloads, optimises and test-runs it, so a change that leaves
+    /// the model request and the frame alone keeps the one already open.
+    pub fn reconfigure(&self, cfg: &MaskConfig, frame: Size) -> Result<Self> {
+        if cfg.seg == self.cfg.seg && frame == self.frame {
+            return Ok(Self {
+                cfg: cfg.clone(),
+                ..self.clone()
+            });
+        }
+        cfg.prepare(frame)
+    }
+
+    pub fn runs_inference(&self) -> bool {
+        self.model.is_some()
+    }
+
+    /// Stateless, so safe to call from the parallel workers.
+    pub fn segment(&self, rgb: &Rgb8) -> Result<Option<SegLabels>> {
+        self.model.as_ref().map(|m| m.labels(rgb)).transpose()
+    }
+
+    /// Driven from the serial stage so masks never depend on thread scheduling.
+    pub fn smoother(&self) -> SegSmoother {
+        SegSmoother::new(
+            self.cfg
+                .seg
+                .as_ref()
+                .map(|s| s.cfg.temporal_window)
+                .unwrap_or(1),
+        )
+    }
+
+    /// `small`/`gray` are the metric thumbnail; `seg` is already smoothed.
+    /// Narrows `gray` to the SfM set before measuring sharpness: that is a
+    /// selection question, not a supervision one, so the sky belongs out of it.
+    pub fn judge(
+        &self,
+        small: &Rgb8,
+        gray: &mut GrayFrame,
+        seg: Option<&SegLabels>,
+    ) -> FrameJudgement {
+        let mut judgement = FrameJudgement {
+            mask: None,
+            layers: Vec::new(),
+            sharpness: 0.0,
+        };
+        if self.cfg.is_active() {
+            judgement.layers = self.class_layers(small, gray, seg);
+            let set = self.mask_set(&judgement.layers, gray.size);
+            gray.restrict_to(&set.sfm.data);
+            judgement.mask = Some(set);
+        }
+        judgement.sharpness = laplacian_variance(gray);
+        judgement
+    }
+
+    fn class_layers(
+        &self,
+        rgb: &Rgb8,
+        gray: &GrayFrame,
+        seg: Option<&SegLabels>,
+    ) -> Vec<(MaskClass, Mask)> {
+        let mut out = Vec::new();
+        if let (Some(model), Some(labels)) = (&self.model, seg) {
+            out.extend(
+                model
+                    .masks(labels)
+                    .into_iter()
+                    .map(|(class, m)| (class, m.scaled_to(gray.size))),
+            );
+        }
+        let heuristic_sky = self
+            .cfg
+            .sources()
+            .any(|s| s == (MaskClass::Sky, MaskSource::Heuristic));
+        if let Some(p) = self.cfg.sky.filter(|_| heuristic_sky) {
+            out.push((MaskClass::Sky, sky_mask(rgb, gray, p)));
+        }
+        out
+    }
+
+    fn mask_set(&self, layers: &[(MaskClass, Mask)], size: Size) -> MaskSet {
+        let mut sfm = Mask::all_valid(size);
+        let mut training = self.cfg.has_training_class().then(|| Mask::all_valid(size));
+        for (class, layer) in layers {
+            sfm.intersect(layer);
+            if class.use_() == MaskUse::SfmAndTraining
+                && let Some(t) = &mut training
+            {
+                t.intersect(layer);
+            }
+        }
+        MaskSet { sfm, training }
+    }
+}
+
+/// Bright blue top half, dark ground bottom half: a sky every source should find. Shared by the tests here and in `sky`.
+#[cfg(test)]
+fn synthetic(w: u32, h: u32) -> Rgb8 {
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for _ in 0..w {
+            if y < h / 2 {
+                rgb.extend_from_slice(&[150, 180, 230]);
+            } else {
+                rgb.extend_from_slice(&[60, 70, 40]);
+            }
+        }
+    }
+    Rgb8::new(Size::new(w, h), rgb).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gray::rgb_to_gray;
 
-    /// Bright blue top half, dark ground bottom half.
-    fn synthetic(w: u32, h: u32) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-        for y in 0..h {
-            for _ in 0..w {
-                if y < h / 2 {
-                    rgb.extend_from_slice(&[150, 180, 230]);
-                } else {
-                    rgb.extend_from_slice(&[60, 70, 40]);
-                }
-            }
-        }
-        rgb
-    }
+    use super::synthetic;
 
     #[test]
     fn sky_alone_writes_no_training_set() {
@@ -465,56 +512,36 @@ mod tests {
         let cfg = MaskConfig {
             sky: Some(SkyParams::default()),
             seg: None,
-            model: None,
         };
         assert!(!cfg.has_training_class());
-        let gray = rgb_to_gray(&rgb, w, h);
+        let mut gray = rgb_to_gray(&rgb);
+        let judged = cfg
+            .prepare(Size::new(w, h))
+            .unwrap()
+            .judge(&rgb, &mut gray, None);
         assert!(
-            cfg.compute(&rgb, &gray, None).training.is_none(),
+            judged.mask.unwrap().training.is_none(),
             "an all-valid training mask is not the same as no training mask"
         );
+        assert_eq!(judged.layers.len(), 1);
+        assert!(gray.valid.is_some(), "sharpness must skip the masked sky");
     }
 
-    /// A new class or a changed `MaskUse` must not let the two forms drift apart.
     #[test]
-    fn fast_predicates_match_the_class_list() {
-        use crate::seg::{SegClassParams, SegConfig};
-
-        let skies = [None, Some(SkyParams::default())];
-        let seg_skies = [None, Some(SegClassParams::sky())];
-        let seg_people = [None, Some(SegClassParams::people())];
-        for sky in skies {
-            for with_model in [false, true] {
-                for s in seg_skies {
-                    for p in seg_people {
-                        let cfg = MaskConfig {
-                            sky,
-                            seg: with_model.then(|| SegRequest {
-                                model_path: "unused.onnx".into(),
-                                cfg: SegConfig {
-                                    sky: s,
-                                    people: p,
-                                    ..Default::default()
-                                },
-                            }),
-                            model: None,
-                        };
-                        assert_eq!(
-                            cfg.is_active(),
-                            !cfg.classes().is_empty(),
-                            "is_active disagrees with classes() for {cfg:?}"
-                        );
-                        assert_eq!(
-                            cfg.has_training_class(),
-                            cfg.classes()
-                                .iter()
-                                .any(|c| c.use_() == MaskUse::SfmAndTraining),
-                            "has_training_class disagrees with classes() for {cfg:?}"
-                        );
-                    }
-                }
-            }
-        }
+    fn people_without_a_model_is_refused() {
+        let sources = MaskSources {
+            mask_sky: false,
+            sky_heuristic: SkyParams::default(),
+            model: None,
+            sky_class: crate::seg::SegClassParams::sky(),
+            people_class: Some(crate::seg::SegClassParams::people()),
+            seg_width: crate::seg::DEFAULT_SEG_WIDTH,
+            temporal_window: 1,
+        };
+        assert_eq!(
+            MaskConfig::from_sources(sources),
+            Err(MaskSourceError::PeopleWithoutModel)
+        );
     }
 
     #[test]
@@ -529,7 +556,6 @@ mod tests {
                     ..Default::default()
                 },
             }),
-            model: None,
         };
         let d = cfg.describe();
         let sky = d.classes.iter().find(|c| c.name == "sky").unwrap();

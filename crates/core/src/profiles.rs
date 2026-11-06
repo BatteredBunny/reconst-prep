@@ -10,9 +10,6 @@ const INDEX_URL: &str =
     "https://api.github.com/repos/gyroflow/lens_profiles/git/trees/main?recursive=1";
 const RAW_BASE: &str = "https://raw.githubusercontent.com/gyroflow/lens_profiles/main/";
 
-use crate::USER_AGENT;
-
-/// Re-fetch the index when the cached copy is older than this.
 const INDEX_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The GUI holds a spinner up until one of these returns, so a stalled connection must fail rather than wedge it.
@@ -25,20 +22,12 @@ pub struct ProfileEntry {
     pub path: String,
 }
 
-/// `~/.cache/reconst-prep/lens-profiles` or the platform equivalent.
 pub fn cache_dir() -> Result<PathBuf> {
     crate::paths::cache_dir("lens-profiles")
 }
 
 fn get(url: &str) -> Result<String> {
-    ureq::get(url)
-        // GitHub rejects requests without one.
-        .header("User-Agent", USER_AGENT)
-        .config()
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .call()
-        .with_context(|| format!("fetching {url}"))?
+    crate::http_get(url, TIMEOUT)?
         .into_body()
         .read_to_string()
         .with_context(|| format!("reading response from {url}"))
@@ -61,8 +50,7 @@ pub fn index(offline: bool, refresh: bool) -> Result<Vec<ProfileEntry>> {
     }
     if offline {
         bail!(
-            "no cached lens-profile index at {}. Run `reconst-prep profiles update` once with \
-             network access",
+            "no cached lens-profile index at {}; it has to be fetched once with network access",
             path.display()
         );
     }
@@ -97,12 +85,17 @@ struct GitNode {
     kind: String,
 }
 
-/// Matched against the whole path, so a maker name filters as well as a model name.
-pub fn search<'a>(entries: &'a [ProfileEntry], query: &str) -> Vec<&'a ProfileEntry> {
-    let terms: Vec<String> = query
+/// The words a query matches on, lowercased; a frontend highlighting hits must split it the same way.
+pub fn terms(query: &str) -> Vec<String> {
+    query
         .split_whitespace()
         .map(|t| t.to_ascii_lowercase())
-        .collect();
+        .collect()
+}
+
+/// Matched against the whole path, so a maker name filters as well as a model name.
+pub fn search<'a>(entries: &'a [ProfileEntry], query: &str) -> Vec<&'a ProfileEntry> {
+    let terms = terms(query);
     if terms.is_empty() {
         return entries.iter().collect();
     }
@@ -124,8 +117,7 @@ pub fn fetch(entry: &ProfileEntry) -> Result<PathBuf> {
         );
     }
     let dir = cache_dir()?;
-    // Flattened: a single directory is easier to point `--profile` at by hand.
-    let local = dir.join(entry.path.replace('/', "_"));
+    let local = dir.join(cache_name(&entry.path));
     if local.is_file() {
         return Ok(local);
     }
@@ -141,6 +133,12 @@ pub fn fetch(entry: &ProfileEntry) -> Result<PathBuf> {
         .with_context(|| format!("{} is not valid JSON", entry.path))?;
     crate::paths::write_atomic(&local, body.as_bytes())?;
     Ok(local)
+}
+
+/// Flattened, since one directory is easier to point `--profile` at by hand. Escaped rather than
+/// replaced, so `a/b_c.json` and `a_b/c.json` cannot share a cache file.
+fn cache_name(path: &str) -> String {
+    path.replace('%', "%25").replace('/', "%2F")
 }
 
 /// RFC 3986 unreserved characters, plus `/`, which stays a path separator.

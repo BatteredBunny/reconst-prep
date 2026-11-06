@@ -7,10 +7,13 @@ use eframe::egui;
 use reconst_prep_core::cancel::CancelToken;
 use reconst_prep_core::decode::ClipInfo;
 
+use reconst_prep_core::mask::MaskSourceError;
 use reconst_prep_core::output::ImageFormat;
-use reconst_prep_core::pipeline::{OutputSpec, PipelineConfig, Progress, run_pipeline};
+use reconst_prep_core::pipeline::{
+    OutputSpec, PipelineConfig, Progress, RunManifest, run_pipeline,
+};
 use reconst_prep_core::profiles::ProfileEntry;
-use reconst_prep_core::undistort::ProfileSummary;
+use reconst_prep_core::undistort::{LensProfileFile, ProfileSummary};
 
 mod clips;
 mod icons;
@@ -22,7 +25,7 @@ mod theme;
 mod ui;
 mod widgets;
 
-use preview::{PreviewData, PreviewRequest, PreviewUpdate};
+use preview::{MaskCache, PreviewData, PreviewRequest, PreviewUpdate, SharedFfmpeg};
 use settings::{InterruptedRun, Settings};
 
 /// What the command line handed the GUI; everything else comes from the persisted settings.
@@ -67,13 +70,13 @@ pub(crate) struct RunError {
 
 pub(crate) enum Msg {
     Progress(Progress),
-    RunDone(Result<Box<reconst_prep_core::pipeline::RunManifest>, RunError>),
+    RunDone(Result<Box<RunManifest>, RunError>),
     /// Carries its request's generation: a stale update landing over a newer one would show settings no longer on screen.
     Preview(u64, PreviewUpdate),
     PreviewFailed(u64, String),
     Probed(PathBuf, Result<Box<ClipInfo>, String>),
-    /// `Err` only so a clip that cannot be decoded is not retried forever.
-    Thumbnail(PathBuf, Result<Box<preview::DisplayImage>, ()>),
+    /// `None` when the clip cannot be decoded, which stops it being retried forever.
+    Thumbnail(PathBuf, Option<Box<preview::DisplayImage>>),
     ProfileIndex(Result<Vec<ProfileEntry>, String>),
     ProfileFetched(Result<PathBuf, String>),
     ModelProgress(f32),
@@ -91,23 +94,6 @@ impl Emit {
         let _ = self.tx.send(msg);
         self.ctx.request_repaint();
     }
-}
-
-// UI-side config model, mapping 1:1 onto PipelineConfig.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum SizeChoice {
-    Same,
-    Scale,
-    Exact,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ModeChoice {
-    Motion,
-    EveryNth,
 }
 
 /// The lens-profile browser: a search over Gyroflow's cached index.
@@ -130,6 +116,23 @@ pub(crate) struct ModelPicker {
     /// Cache filename of the entry being downloaded, and its progress 0..1.
     pub downloading: Option<(String, f32)>,
     pub error: Option<String>,
+}
+
+/// The preview worker: what is in flight and what was last asked for.
+#[derive(Default)]
+pub(crate) struct PreviewJob {
+    pub busy: bool,
+    /// Named in the header beside a spinner.
+    pub stage: Option<&'static str>,
+    pub error: Option<String>,
+    /// Bumped on every request; worker messages from any other generation are dropped on arrival.
+    generation: u64,
+    /// Replaced per request, so a superseded worker stops instead of finishing into the void.
+    cancel: CancelToken,
+    /// The request the current settings would issue, and when it last changed. See `auto_preview`.
+    pending: Option<PreviewRequest>,
+    pending_at: f64,
+    pub previewed: Option<PreviewRequest>,
 }
 
 /// Preview pane view state: what is on screen, not what was computed.
@@ -170,6 +173,70 @@ impl PreviewView {
     }
 }
 
+/// Everything about the preview pane: which frame, what is in flight, what came back, and how it is shown.
+pub(crate) struct PreviewState {
+    pub clip: usize,
+    /// Position in the clip, 0..1.
+    pub pos: f64,
+    pub data: Option<PreviewData>,
+    pub job: PreviewJob,
+    pub view: PreviewView,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            clip: 0,
+            pos: 0.25,
+            data: None,
+            job: PreviewJob::default(),
+            view: PreviewView::default(),
+        }
+    }
+}
+
+impl PreviewState {
+    fn on_update(&mut self, ctx: &egui::Context, update: PreviewUpdate) {
+        match update {
+            PreviewUpdate::Raw(p) => {
+                self.job.busy = false;
+                self.view.set_output(ctx, &p.output);
+                self.view.source_tex = Some(ui::preview_pane::rgb_texture(
+                    ctx,
+                    "preview-source",
+                    &p.source,
+                ));
+                // The old frame's mask must not tint the new frame.
+                self.view.overlay_tex = None;
+                self.data = Some(*p);
+            }
+            PreviewUpdate::Stage(stage) => self.job.stage = Some(stage),
+            PreviewUpdate::Rendered(img) => {
+                self.job.stage = None;
+                self.view.set_output(ctx, &img);
+                if let Some(p) = &mut self.data {
+                    p.output = img;
+                }
+            }
+            PreviewUpdate::Finished {
+                overlay,
+                masked_fraction,
+                sharpness,
+            } => {
+                self.job.stage = None;
+                self.view.overlay_tex = overlay
+                    .as_ref()
+                    .map(|o| ui::preview_pane::rgba_texture(ctx, "preview-overlay", o));
+                if let Some(p) = &mut self.data {
+                    p.masked_fraction = masked_fraction;
+                    p.sharpness = Some(sharpness);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct App {
     pub cfg: Settings,
 
@@ -186,23 +253,10 @@ pub(crate) struct App {
     pub interrupted: Option<InterruptedRun>,
     resume_next: bool,
 
-    // --- Preview
-    pub preview_clip: usize,
-    pub preview_pos: f64,
-    pub preview_busy: bool,
-    pub preview: Option<PreviewData>,
-    pub preview_error: Option<String>,
-    pub view: PreviewView,
-    /// Bumped on every request; worker messages from any other generation are dropped on arrival.
-    preview_gen: u64,
-    /// Replaced per request, so a superseded worker stops instead of finishing into the void.
-    preview_cancel: CancelToken,
-    /// Named in the header beside a spinner.
-    pub preview_stage: Option<&'static str>,
-    /// The request the current settings would issue, and when it last changed. See `auto_preview`.
-    preview_pending: Option<PreviewRequest>,
-    preview_pending_at: f64,
-    previewed: Option<PreviewRequest>,
+    pub preview: PreviewState,
+    /// Shared by every probe, thumbnail and preview worker.
+    ffmpeg: SharedFfmpeg,
+    masks: MaskCache,
 
     // --- Run
     pub running: bool,
@@ -216,7 +270,7 @@ pub(crate) struct App {
 
     pub about_open: bool,
     /// The manifest of the run that just finished, while its summary is up.
-    pub summary: Option<std::sync::Arc<reconst_prep_core::pipeline::RunManifest>>,
+    pub summary: Option<Arc<RunManifest>>,
 
     /// Tracked so the title is only re-sent to the compositor when it changes.
     shown_title: String,
@@ -226,8 +280,7 @@ pub(crate) struct App {
     /// profile edited in place is not noticed until it is picked again.
     profile_summary: Option<(PathBuf, Result<ProfileSummary, String>)>,
 
-    pub tx: Sender<Msg>,
-    pub rx: Receiver<Msg>,
+    channel: Channel,
 }
 
 /// The "s" in "3 clips", for any of the integer types the counts arrive as.
@@ -235,42 +288,15 @@ pub(crate) fn plural<N: PartialEq + From<u8>>(n: N) -> &'static str {
     if n == N::from(1) { "" } else { "s" }
 }
 
-impl Default for App {
+pub(crate) struct Channel {
+    tx: Sender<Msg>,
+    rx: Receiver<Msg>,
+}
+
+impl Default for Channel {
     fn default() -> Self {
         let (tx, rx) = unbounded();
-        Self {
-            cfg: Settings::default(),
-            clips: clips::ClipLibrary::default(),
-            browser: ProfileBrowser::default(),
-            models: ModelPicker::default(),
-            out_dir: None,
-            interrupted: None,
-            resume_next: false,
-            preview_clip: 0,
-            preview_pos: 0.25,
-            preview_busy: false,
-            preview: None,
-            preview_error: None,
-            view: PreviewView::default(),
-            preview_gen: 0,
-            preview_cancel: CancelToken::new(),
-            preview_stage: None,
-            preview_pending: None,
-            preview_pending_at: 0.0,
-            previewed: None,
-            running: false,
-            cancel: CancelToken::new(),
-            progress: None,
-            last_result: None,
-            toasts: Vec::new(),
-            about_open: false,
-            summary: None,
-            resume_prompt: ui::resume::Prompt::default(),
-            shown_title: String::new(),
-            profile_summary: None,
-            tx,
-            rx,
-        }
+        Self { tx, rx }
     }
 }
 
@@ -282,12 +308,19 @@ impl App {
 
     /// `cached_model` is a parameter so tests do not depend on this machine's cache.
     fn from_settings_with(s: Settings, cached_model: Option<PathBuf>) -> Self {
-        // A question at launch, never an action.
-        let interrupted = InterruptedRun::load();
+        let mut app = Self {
+            // A question at launch, never an action.
+            interrupted: InterruptedRun::load(),
+            ..Self::default()
+        };
+        app.adopt_settings(s, cached_model);
+        app
+    }
 
-        let mut cfg = s;
+    /// In place, so worker channels and in-flight cancel tokens survive.
+    fn adopt_settings(&mut self, mut cfg: Settings, cached_model: Option<PathBuf>) {
         // The browser owns the recent list while the window is open.
-        let recent = std::mem::take(&mut cfg.recent_profiles);
+        self.browser.recent = std::mem::take(&mut cfg.recent_profiles);
         cfg.seg_model = cfg
             .seg_model
             .take()
@@ -295,23 +328,13 @@ impl App {
             .or(cached_model);
         // The checkbox is disabled without a model, so checked-but-disabled could never be unticked.
         cfg.mask_people = cfg.mask_people && cfg.seg_model.is_some();
-        Self {
-            cfg,
-            browser: ProfileBrowser {
-                recent,
-                ..Default::default()
-            },
-            interrupted,
-            ..Self::default()
-        }
+        self.cfg = cfg;
     }
 
     /// A flag that was not given leaves the persisted setting alone.
     fn with(mut self, start: Start) -> Self {
         for p in start.inputs {
-            if !self.clips.inputs.contains(&p) {
-                self.clips.inputs.push(p);
-            }
+            self.clips.add(p);
         }
         if let Some(p) = start.profile {
             self.cfg.undistort = true;
@@ -344,29 +367,33 @@ impl App {
 
     // -- config -> core types ---------------------------------------------
 
-    /// `None` when the run is not yet configured enough to start.
-    pub fn pipeline_config(&self) -> Option<PipelineConfig> {
-        if self.clips.inputs.is_empty() || (self.cfg.undistort && self.cfg.profile.is_none()) {
-            return None;
+    /// The run Process would start, or what still has to be filled in, phrased as the next thing to do.
+    /// One function, so the button and the run can never disagree about readiness.
+    pub fn run_config(&self) -> Result<PipelineConfig, &'static str> {
+        if self.clips.inputs().is_empty() {
+            return Err("Add at least one video.");
         }
-        Some(PipelineConfig {
-            inputs: self.clips.inputs.clone(),
+        let Some(out_dir) = self.out_dir.clone() else {
+            return Err("Choose an output folder.");
+        };
+        if self.cfg.lens_unready() {
+            return Err("Pick a lens profile, or turn off lens correction.");
+        }
+        let mask = self.cfg.mask_config().map_err(|e| match e {
+            MaskSourceError::PeopleWithoutModel => "People masking needs a segmentation model.",
+        })?;
+        Ok(PipelineConfig {
+            inputs: self.clips.inputs().to_vec(),
             profile_path: self.cfg.active_profile(),
-            out_dir: self.out_dir.clone()?,
+            out_dir,
             output_size: self.cfg.output_spec(),
-            format: if self.cfg.format_jpeg {
-                ImageFormat::Jpeg {
-                    quality: self.cfg.jpeg_quality,
-                }
-            } else {
-                ImageFormat::Png
-            },
+            format: self.cfg.image_format(),
             selection: self.cfg.selection_config(),
             hwaccel: self.cfg.hwaccel.clone(),
             ffmpeg_path: None,
             interp: self.cfg.interp,
             gpu: self.cfg.gpu,
-            mask: self.cfg.mask_config(),
+            mask,
             writer_threads: 0,
             undistort_threads: 0,
             resume: self.resume_next,
@@ -374,7 +401,6 @@ impl App {
         })
     }
 
-    /// Which mask classes are switched on, by name.
     /// The whole run in one line: what would happen if Process were pressed.
     pub fn job_summary(&self) -> String {
         let n = self.clips.files().len();
@@ -386,10 +412,9 @@ impl App {
             OutputSpec::Scale { factor } => format!("×{factor}"),
             OutputSpec::Exact { width, height } => format!("{width}×{height}"),
         };
-        let format = if self.cfg.format_jpeg {
-            format!("JPEG q{}", self.cfg.jpeg_quality)
-        } else {
-            "PNG".to_string()
+        let format = match self.cfg.image_format() {
+            ImageFormat::Jpeg { quality } => format!("JPEG q{quality}"),
+            ImageFormat::Png => "PNG".to_string(),
         };
         let mut s = format!("{n} clip{}  ·  {size} {format}", plural(n));
         if self.cfg.undistort {
@@ -407,10 +432,8 @@ impl App {
 
     /// Is the selected folder the one an unfinished run was writing into?
     pub fn can_resume_here(&self) -> bool {
-        match (&self.interrupted, &self.out_dir) {
-            (Some(run), Some(out)) => &run.out_dir == out,
-            _ => false,
-        }
+        (self.interrupted.as_ref().zip(self.out_dir.as_ref()))
+            .is_some_and(|(run, out)| &run.out_dir == out)
     }
 
     /// Clips, settings and output folder together, because the pipeline refuses a resume whose parameters differ.
@@ -418,28 +441,15 @@ impl App {
         let Some(run) = self.interrupted.clone() else {
             return;
         };
-        *self = Self::from_settings(run.settings.clone()).with(Start {
-            inputs: run.inputs.clone(),
-            profile: None,
-            out_dir: Some(run.out_dir.clone()),
-        });
-        log::info!("resuming the run into {}", run.out_dir.display());
-        self.interrupted = Some(run);
-    }
-
-    /// What still has to be filled in, phrased as the next thing to do.
-    pub fn not_ready_reason(&self) -> Option<&'static str> {
-        if self.clips.inputs.is_empty() {
-            Some("Add at least one video.")
-        } else if self.out_dir.is_none() {
-            Some("Choose an output folder.")
-        } else if self.cfg.undistort && self.cfg.profile.is_none() {
-            Some("Pick a lens profile, or turn off lens correction.")
-        } else if self.cfg.mask_people && self.cfg.seg_model.is_none() {
-            Some("People masking needs a segmentation model.")
-        } else {
-            None
+        let cached_model = reconst_prep_core::models::cached().into_iter().next();
+        self.adopt_settings(run.settings.clone(), cached_model);
+        self.clips.clear();
+        for p in &run.inputs {
+            self.clips.add(p.clone());
         }
+        self.out_dir = Some(run.out_dir.clone());
+        self.preview.clip = 0;
+        log::info!("resuming the run into {}", run.out_dir.display());
     }
 
     /// Every worker goes through here or [`Self::spawn_worker_with`], so none can forget the repaint that shows its answer.
@@ -460,7 +470,7 @@ impl App {
         job: impl FnOnce(&Emit) + Send + 'static,
     ) {
         let out = Emit {
-            tx: self.tx.clone(),
+            tx: self.channel.tx.clone(),
             ctx: ctx.clone(),
         };
         std::thread::Builder::new()
@@ -469,15 +479,16 @@ impl App {
             .unwrap_or_else(|e| panic!("spawn {name} thread: {e}"));
     }
 
-    /// Probe every input that has not been probed yet, off the UI thread.
     pub fn probe_missing(&mut self, ctx: &egui::Context) {
         // Capped: dropping two hundred clips must not put two hundred threads and ffprobe processes in flight.
         const WORKERS: usize = 8;
 
         while let Some(path) = self.clips.claim_unprobed(WORKERS) {
+            let ff = self.ffmpeg.clone();
             self.spawn_worker("probe", ctx, move || {
-                let res = reconst_prep_core::decode::Ffmpeg::resolve(None)
-                    .and_then(|ff| reconst_prep_core::decode::probe_clip(&ff, &path))
+                let res = ff
+                    .get()
+                    .and_then(|ff| reconst_prep_core::decode::probe_clip(ff, &path))
                     .map(Box::new)
                     .map_err(|e| format!("{e:#}"));
                 Msg::Probed(path, res)
@@ -491,10 +502,11 @@ impl App {
         const WORKERS: usize = 6;
 
         while let Some((path, duration_s)) = self.clips.claim_unthumbed(WORKERS) {
+            let ff = self.ffmpeg.clone();
             self.spawn_worker("thumbnail", ctx, move || {
-                let res = preview::build_thumbnail(&path, duration_s)
+                let res = preview::build_thumbnail(&path, duration_s, &ff)
                     .map(Box::new)
-                    .map_err(|_| ());
+                    .ok();
                 Msg::Thumbnail(path, res)
             });
         }
@@ -503,31 +515,26 @@ impl App {
     /// Clamped in one place: readers that clamp differently disagree about which clip they mean.
     pub fn preview_clip_path(&self) -> Option<&PathBuf> {
         let files = self.clips.files();
-        files.get(self.preview_clip.min(files.len().checked_sub(1)?))
+        files.get(self.preview.clip.min(files.len().checked_sub(1)?))
     }
 
-    /// What ffprobe found about that clip, once it has been probed.
     pub fn preview_clip_info(&self) -> Option<&ClipInfo> {
-        self.clips
-            .probes
-            .get(self.preview_clip_path()?)?
-            .as_ref()
-            .ok()
+        self.clips.probe(self.preview_clip_path()?)?.as_ref().ok()
     }
 
     /// Narrower than `PipelineConfig`: format and quality change the written file but not the frame on screen.
     fn preview_request(&self) -> Option<PreviewRequest> {
-        if self.cfg.undistort && self.cfg.profile.is_none() {
+        if self.cfg.lens_unready() {
             return None;
         }
         Some(PreviewRequest {
-            path: self.preview_clip_path()?.clone(),
+            clip: self.preview_clip_info()?.clone(),
             profile: self.cfg.active_profile(),
-            pos: self.preview_pos,
+            pos: self.preview.pos,
             output_spec: self.cfg.output_spec(),
             interp: self.cfg.interp,
             hwaccel: self.cfg.hwaccel.clone(),
-            mask: self.cfg.mask_config(),
+            mask: self.cfg.mask_config().ok()?,
         })
     }
 
@@ -537,55 +544,45 @@ impl App {
 
         let req = self.preview_request();
         let now = ctx.input(|i| i.time);
-        if req != self.preview_pending {
-            self.preview_pending = req.clone();
-            self.preview_pending_at = now;
+        let job = &mut self.preview.job;
+        if req != job.pending {
+            job.pending = req.clone();
+            job.pending_at = now;
         }
-        if req == self.previewed || self.preview_busy {
+        if req == job.previewed || job.busy {
             return;
         }
-        if now - self.preview_pending_at < SETTLE_S {
+        if now - job.pending_at < SETTLE_S {
             // Nothing else would wake us at the end of the pause.
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(SETTLE_S));
             return;
         }
-        self.previewed = req;
+        job.previewed = req;
         self.request_preview(ctx);
     }
 
     pub fn request_preview(&mut self, ctx: &egui::Context) {
-        if self.preview_busy {
+        if self.preview.job.busy {
             return;
         }
         let Some(req) = self.preview_request() else {
             return;
         };
+        let job = &mut self.preview.job;
         // A newer request supersedes anything in flight: its results can no longer land.
-        self.preview_cancel.cancel();
-        self.preview_cancel = CancelToken::new();
-        self.preview_gen += 1;
-        let generation = self.preview_gen;
-        let cancel = self.preview_cancel.clone();
-        self.preview_busy = true;
-        self.preview_stage = None;
-        self.preview_error = None;
-        log::info!(
-            "preview: {} at {:.0}%{}{}",
-            req.path.file_name().unwrap_or_default().to_string_lossy(),
-            req.pos * 100.0,
-            if req.profile.is_some() {
-                ", undistorting"
-            } else {
-                ""
-            },
-            match self.cfg.masked_classes().join(", ") {
-                s if s.is_empty() => String::new(),
-                s => format!(", masking {s}"),
-            }
-        );
+        job.cancel.cancel();
+        job.cancel = CancelToken::new();
+        job.generation += 1;
+        let generation = job.generation;
+        let cancel = job.cancel.clone();
+        job.busy = true;
+        job.stage = None;
+        job.error = None;
+        log::info!("preview: {} at {:.0}%", req.clip.stem, req.pos * 100.0);
+        let (ff, masks) = (self.ffmpeg.clone(), self.masks.clone());
         self.spawn_worker_with("preview", ctx, move |out| {
             let mut emit = |u: PreviewUpdate| out.send(Msg::Preview(generation, u));
-            if let Err(e) = preview::build_preview(&req, &cancel, &mut emit) {
+            if let Err(e) = preview::build_preview(&req, &ff, &masks, &cancel, &mut emit) {
                 out.send(Msg::PreviewFailed(generation, format!("{e:#}")));
             }
         });
@@ -608,11 +605,7 @@ impl App {
         self.spawn_worker_with("model-fetch", ctx, move |out| {
             let mut last = 0.0f32;
             let mut progress = |done: u64, total: u64| {
-                let f = if total > 0 {
-                    (done as f32 / total as f32).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+                let f = (done as f32 / total.max(1) as f32).min(1.0);
                 // Only wake the UI on visible movement.
                 if f - last >= 0.01 {
                     last = f;
@@ -625,12 +618,10 @@ impl App {
         });
     }
 
-    /// How long the previewed clip runs, from its probe.
     pub fn preview_duration_s(&self) -> Option<f64> {
         preview::duration_of(self.preview_clip_info()?)
     }
 
-    /// What the preview's arrow buttons step the position by.
     pub fn preview_frame_pos_step(&self) -> Option<f64> {
         let info = self.preview_clip_info()?;
         let duration_s = preview::duration_of(info)?;
@@ -640,22 +631,17 @@ impl App {
     /// The record written here is deleted only on *success*, which is how the next launch knows to offer it.
     pub fn start_run(&mut self, ctx: &egui::Context, resume: bool) {
         self.resume_next = resume;
-        let Some(cfg) = self.pipeline_config() else {
+        let Ok(cfg) = self.run_config() else {
             return;
         };
         self.to_settings().save();
-        if let Some(out_dir) = self.out_dir.clone() {
-            InterruptedRun {
-                out_dir,
-                inputs: self.clips.inputs.clone(),
-                settings: self.to_settings(),
-                started_unix: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            }
-            .save();
+        InterruptedRun {
+            out_dir: cfg.out_dir.clone(),
+            inputs: cfg.inputs.clone(),
+            settings: self.to_settings(),
+            started_unix: reconst_prep_core::paths::unix_now(),
         }
+        .save();
         log::info!(
             "run {}: {}",
             if resume { "resuming" } else { "starting" },
@@ -679,72 +665,34 @@ impl App {
         });
     }
 
-    fn on_run_done(&mut self, r: Result<Box<reconst_prep_core::pipeline::RunManifest>, RunError>) {
+    fn on_run_done(&mut self, r: Result<Box<RunManifest>, RunError>) {
         self.running = false;
         self.resume_next = false;
         let written = self.progress.as_ref().map_or(0, |p| p.total_written);
-        if let Ok(manifest) = &r {
-            InterruptedRun::clear();
-            self.summary = Some(Arc::new((**manifest).clone()));
-        }
+        let result = match r {
+            Ok(m) => {
+                log::info!(
+                    "run finished: {} written from {} decoded over {} clip{} in {:.1}s",
+                    m.totals.written,
+                    m.totals.decoded,
+                    m.clips.len(),
+                    plural(m.clips.len()),
+                    m.totals.wall_seconds
+                );
+                InterruptedRun::clear();
+                // No toast on success: the summary modal already has the same numbers.
+                self.summary = Some(Arc::from(m));
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("run stopped: {}", e.message);
+                self.toasts.push(ui::status::stopped_toast(&e, written));
+                Err(e)
+            }
+        };
         // Re-read: whether there is anything to pick up is a question about the dataset on disk.
         self.interrupted = InterruptedRun::load();
-        match &r {
-            Ok(m) => log::info!(
-                "run finished: {} written from {} decoded over {} clip{} in {:.1}s",
-                m.totals.written,
-                m.totals.decoded,
-                m.clips.len(),
-                plural(m.clips.len()),
-                m.totals.wall_seconds
-            ),
-            Err(e) => log::warn!("run stopped: {}", e.message),
-        }
-        let result = r.map(|_| ());
-        // No toast on success: the summary modal already has the same numbers.
-        if let Err(e) = &result {
-            self.toasts.push(ui::status::stopped_toast(e, written));
-        }
         self.last_result = Some(result);
-    }
-
-    fn on_preview_update(&mut self, ctx: &egui::Context, update: PreviewUpdate) {
-        match update {
-            PreviewUpdate::Raw(p) => {
-                self.preview_busy = false;
-                self.view.set_output(ctx, &p.output);
-                self.view.source_tex = Some(ui::preview_pane::rgb_texture(
-                    ctx,
-                    "preview-source",
-                    &p.source,
-                ));
-                // The old frame's mask must not tint the new frame.
-                self.view.overlay_tex = None;
-                self.preview = Some(*p);
-            }
-            PreviewUpdate::Stage(stage) => self.preview_stage = Some(stage),
-            PreviewUpdate::Rendered(img) => {
-                self.preview_stage = None;
-                self.view.set_output(ctx, &img);
-                if let Some(p) = &mut self.preview {
-                    p.output = img;
-                }
-            }
-            PreviewUpdate::Finished {
-                overlay,
-                masked_fraction,
-                sharpness,
-            } => {
-                self.preview_stage = None;
-                self.view.overlay_tex = overlay
-                    .as_ref()
-                    .map(|o| ui::preview_pane::rgba_texture(ctx, "preview-overlay", o));
-                if let Some(p) = &mut self.preview {
-                    p.masked_fraction = masked_fraction;
-                    p.sharpness = Some(sharpness);
-                }
-            }
-        }
     }
 
     /// The validated lens profile, parsed once per path rather than per frame.
@@ -755,36 +703,31 @@ impl App {
             .as_ref()
             .is_none_or(|(p, _)| *p != path)
         {
-            let parsed = std::fs::read_to_string(&path)
-                .map_err(|_| "profile file cannot be read".to_string())
-                .and_then(|json| ProfileSummary::validate(&json).map_err(|e| format!("{e:#}")));
+            let parsed = LensProfileFile::load(&path)
+                .map(|f| f.summary().clone())
+                .map_err(|e| format!("{e:#}"));
             self.profile_summary = Some((path, parsed));
         }
         self.profile_summary.as_ref().map(|(_, s)| s)
     }
 
     fn drain_messages(&mut self, ctx: &egui::Context) {
-        while let Ok(msg) = self.rx.try_recv() {
+        while let Ok(msg) = self.channel.rx.try_recv() {
             match msg {
                 Msg::Progress(p) => self.progress = Some(p),
                 Msg::RunDone(r) => self.on_run_done(r),
                 Msg::Preview(generation, _) | Msg::PreviewFailed(generation, _)
-                    if generation != self.preview_gen => {} // superseded mid-flight
-                Msg::Preview(_, update) => self.on_preview_update(ctx, update),
+                    if generation != self.preview.job.generation => {} // superseded mid-flight
+                Msg::Preview(_, update) => self.preview.on_update(ctx, update),
                 Msg::PreviewFailed(_, e) => {
-                    self.preview_busy = false;
-                    self.preview_stage = None;
-                    self.preview_error = Some(e);
+                    self.preview.job.busy = false;
+                    self.preview.job.stage = None;
+                    self.preview.job.error = Some(e);
                 }
                 Msg::Probed(path, res) => self.clips.on_probed(path, res.map(|b| *b)),
                 Msg::Thumbnail(path, res) => {
-                    let tex = res.ok().map(|img| {
-                        ui::preview_pane::rgb_texture(
-                            ctx,
-                            &format!("thumb:{}", path.display()),
-                            &img,
-                        )
-                    });
+                    let name = format!("thumb:{}", path.display());
+                    let tex = res.map(|img| ui::preview_pane::rgb_texture(ctx, &name, &img));
                     self.clips.on_thumbnail(path, tex);
                 }
                 Msg::ProfileIndex(res) => {
@@ -801,16 +744,10 @@ impl App {
                 }
                 Msg::ModelFetched(res) => {
                     self.models.downloading = None;
+                    self.models.error = res.as_ref().err().cloned();
                     match res {
-                        Ok(p) => {
-                            log::info!("model ready: {}", p.display());
-                            self.cfg.seg_model = Some(p);
-                            self.models.error = None;
-                        }
-                        Err(e) => {
-                            log::warn!("model download failed: {e}");
-                            self.models.error = Some(e);
-                        }
+                        Ok(p) => self.cfg.seg_model = Some(p),
+                        Err(e) => log::warn!("model download failed: {e}"),
                     }
                 }
                 Msg::ProfileFetched(res) => {
@@ -831,7 +768,7 @@ impl App {
     }
 
     /// A `.json` is a lens profile, a `.onnx` is a segmentation model, anything else is footage.
-    fn take_dropped(&mut self, ctx: &egui::Context) -> bool {
+    fn take_dropped(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -839,25 +776,17 @@ impl App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        let mut added_clip = false;
         for p in dropped {
-            match p
+            let ext = p
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .as_deref()
-            {
+                .map(str::to_ascii_lowercase);
+            match ext.as_deref() {
                 Some("json") => self.cfg.profile = Some(p),
                 Some("onnx") => self.cfg.seg_model = Some(p),
-                _ => {
-                    if !self.clips.inputs.contains(&p) {
-                        self.clips.inputs.push(p);
-                        added_clip = true;
-                    }
-                }
+                _ => _ = self.clips.add(p),
             }
         }
-        added_clip
     }
 }
 
@@ -952,13 +881,13 @@ mod tests {
         let before = Settings {
             undistort: true,
             profile: Some("/tmp/lens.json".into()),
-            size_choice: crate::SizeChoice::Scale,
+            size_choice: crate::settings::SizeChoice::Scale,
             scale_factor: 0.75,
             exact_w: 2560,
             exact_h: 1440,
             format_jpeg: false,
             jpeg_quality: 71,
-            mode: crate::ModeChoice::EveryNth,
+            mode: crate::settings::ModeChoice::EveryNth,
             nth: 42,
             motion_threshold: 0.07,
             window: 12,

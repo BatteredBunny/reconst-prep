@@ -62,6 +62,12 @@ pub struct Decision {
     pub keep: bool,
 }
 
+impl Decision {
+    fn new(index: u64, keep: bool) -> Self {
+        Self { index, keep }
+    }
+}
+
 pub trait Selector: Send {
     /// Returns the decisions that became final: none, one, or a whole window at once.
     fn push(&mut self, frame: FrameInfo) -> Vec<Decision>;
@@ -69,15 +75,8 @@ pub trait Selector: Send {
     fn finish(&mut self) -> Result<Vec<Decision>>;
 }
 
-/// Per-clip inputs a selector may need beyond the user's configuration.
-#[derive(Default)]
-pub struct ClipSelection<'a> {
-    /// Exact frame indices to keep, for replay only. Must be sorted.
-    pub replay: Option<&'a [u64]>,
-}
-
-/// Build the selector for one clip.
-pub fn make_selector(cfg: &SelectionConfig, clip: ClipSelection<'_>) -> Result<Box<dyn Selector>> {
+/// Build the selector for one clip. `replay` is the exact, sorted frame list to keep, for replay mode only.
+pub fn make_selector(cfg: &SelectionConfig, replay: Option<&[u64]>) -> Result<Box<dyn Selector>> {
     let inner: Box<dyn Selector> = match &cfg.mode {
         SelectionMode::EveryNth { n } => {
             ensure!(*n >= 1, "every-nth: n must be >= 1");
@@ -87,8 +86,7 @@ pub fn make_selector(cfg: &SelectionConfig, clip: ClipSelection<'_>) -> Result<B
             })
         }
         SelectionMode::Replay { source } => {
-            let frames = clip
-                .replay
+            let frames = replay
                 .ok_or_else(|| anyhow!("{source} has no recorded frame list for this clip"))?;
             // Deliberately not wrapped in BlurFloor: replay must not re-judge.
             return Ok(Box::new(Replay {
@@ -121,10 +119,7 @@ struct BlurFloor {
 impl Selector for BlurFloor {
     fn push(&mut self, frame: FrameInfo) -> Vec<Decision> {
         if frame.sharpness < self.floor {
-            return vec![Decision {
-                index: frame.index,
-                keep: false,
-            }];
+            return vec![Decision::new(frame.index, false)];
         }
         self.inner.push(frame)
     }
@@ -149,10 +144,7 @@ impl Selector for Replay {
         if keep {
             self.pos += 1;
         }
-        vec![Decision {
-            index: f.index,
-            keep,
-        }]
+        vec![Decision::new(f.index, keep)]
     }
     fn finish(&mut self) -> Result<Vec<Decision>> {
         // Recorded frames this clip never produced: the dataset a
@@ -177,10 +169,7 @@ impl Selector for EveryNth {
     fn push(&mut self, f: FrameInfo) -> Vec<Decision> {
         let keep = self.seen.is_multiple_of(self.n);
         self.seen += 1;
-        vec![Decision {
-            index: f.index,
-            keep,
-        }]
+        vec![Decision::new(f.index, keep)]
     }
     fn finish(&mut self) -> Result<Vec<Decision>> {
         Ok(vec![])
@@ -196,6 +185,15 @@ struct MotionGated {
 }
 
 impl MotionGated {
+    /// Add to the open window, resolving it once full.
+    fn extend_window(&mut self, f: FrameInfo) -> Vec<Decision> {
+        self.buf.push(f);
+        if self.buf.len() >= self.window {
+            return self.resolve();
+        }
+        vec![]
+    }
+
     /// Resolve the open window: keep the sharpest frame, drop the rest.
     fn resolve(&mut self) -> Vec<Decision> {
         // No maximum = empty window = gate closed, nothing to resolve.
@@ -214,10 +212,7 @@ impl MotionGated {
             if keep {
                 self.last_kept = Some(f.gray.clone());
             }
-            out.push(Decision {
-                index: f.index,
-                keep,
-            });
+            out.push(Decision::new(f.index, keep));
         }
         out
     }
@@ -226,32 +221,18 @@ impl MotionGated {
 impl Selector for MotionGated {
     fn push(&mut self, f: FrameInfo) -> Vec<Decision> {
         if !self.buf.is_empty() {
-            self.buf.push(f);
-            if self.buf.len() >= self.window {
-                return self.resolve();
-            }
-            return vec![];
+            return self.extend_window(f);
         }
         let Some(last) = &self.last_kept else {
             // First (usable) frame of the clip anchors the sequence.
             self.last_kept = Some(f.gray.clone());
-            return vec![Decision {
-                index: f.index,
-                keep: true,
-            }];
+            return vec![Decision::new(f.index, true)];
         };
         let motion = mean_abs_diff(&f.gray, last);
         if motion >= self.threshold {
-            self.buf.push(f);
-            if self.buf.len() >= self.window {
-                return self.resolve();
-            }
-            return vec![];
+            return self.extend_window(f);
         }
-        vec![Decision {
-            index: f.index,
-            keep: false,
-        }]
+        vec![Decision::new(f.index, false)]
     }
 
     fn finish(&mut self) -> Result<Vec<Decision>> {
@@ -264,20 +245,35 @@ mod tests {
     use super::*;
     use crate::gray::GrayFrame;
 
-    fn gf(v: u8) -> GrayFrame {
-        GrayFrame {
-            w: 4,
-            h: 4,
-            data: vec![v; 16],
-            valid: None,
-        }
-    }
     fn fi(index: u64, sharpness: f64, v: u8) -> FrameInfo {
+        let size = crate::frame::Size::new(4, 4);
+        let gray = GrayFrame {
+            size,
+            data: vec![v; size.px()],
+            valid: None,
+        };
         FrameInfo {
             index,
             sharpness,
-            gray: gf(v),
+            gray,
         }
+    }
+
+    fn cfg(mode: SelectionMode, blur_floor: Option<f64>) -> SelectionConfig {
+        SelectionConfig { mode, blur_floor }
+    }
+
+    fn replay() -> SelectionMode {
+        SelectionMode::Replay {
+            source: "prev.json".into(),
+        }
+    }
+
+    /// Every decision, pushing `frames` then finishing.
+    fn decide(s: &mut dyn Selector, frames: impl IntoIterator<Item = FrameInfo>) -> Vec<Decision> {
+        let mut all: Vec<Decision> = frames.into_iter().flat_map(|f| s.push(f)).collect();
+        all.extend(s.finish().unwrap());
+        all
     }
 
     fn kept(decisions: &[Decision]) -> Vec<u64> {
@@ -290,41 +286,33 @@ mod tests {
 
     #[test]
     fn every_nth_keeps_every_nth() {
-        let cfg = SelectionConfig {
-            mode: SelectionMode::EveryNth { n: 3 },
-            blur_floor: None,
-        };
-        let mut s = make_selector(&cfg, ClipSelection::default()).unwrap();
-        let mut all = vec![];
-        for i in 0..10 {
-            all.extend(s.push(fi(i, 1.0, 0)));
-        }
-        all.extend(s.finish().unwrap());
+        let mut s = make_selector(&cfg(SelectionMode::EveryNth { n: 3 }, None), None).unwrap();
+        let all = decide(&mut *s, (0..10).map(|i| fi(i, 1.0, 0)));
         assert_eq!(kept(&all), vec![0, 3, 6, 9]);
     }
 
     #[test]
     fn motion_gated_keeps_sharpest_in_window() {
-        let cfg = SelectionConfig {
-            mode: SelectionMode::MotionGated {
-                motion_threshold: 0.05,
-                window: 3,
-            },
-            blur_floor: None,
+        let mode = SelectionMode::MotionGated {
+            motion_threshold: 0.05,
+            window: 3,
         };
-        let mut s = make_selector(&cfg, ClipSelection::default()).unwrap();
-        let mut all = vec![];
-        // Frame 0: anchor (kept). Frames 1-2: static (dropped).
-        all.extend(s.push(fi(0, 1.0, 100)));
-        all.extend(s.push(fi(1, 1.0, 100)));
-        all.extend(s.push(fi(2, 1.0, 101)));
-        // Frame 3: big change vs anchor opens a window; frame 4 is sharpest.
-        all.extend(s.push(fi(3, 5.0, 200)));
-        all.extend(s.push(fi(4, 9.0, 200)));
-        all.extend(s.push(fi(5, 2.0, 200)));
-        // Frame 6: static vs new anchor (frame 4) -> dropped.
-        all.extend(s.push(fi(6, 1.0, 200)));
-        all.extend(s.finish().unwrap());
+        let mut s = make_selector(&cfg(mode, None), None).unwrap();
+        let all = decide(
+            &mut *s,
+            [
+                // Frame 0: anchor (kept). Frames 1-2: static (dropped).
+                fi(0, 1.0, 100),
+                fi(1, 1.0, 100),
+                fi(2, 1.0, 101),
+                // Frame 3: big change vs anchor opens a window; frame 4 is sharpest.
+                fi(3, 5.0, 200),
+                fi(4, 9.0, 200),
+                fi(5, 2.0, 200),
+                // Frame 6: static vs new anchor (frame 4) -> dropped.
+                fi(6, 1.0, 200),
+            ],
+        );
         assert_eq!(kept(&all), vec![0, 4]);
         assert_eq!(all.len(), 7); // one decision per pushed frame
     }
@@ -333,20 +321,7 @@ mod tests {
     /// references by name comes out short, which used to pass as a clean run.
     #[test]
     fn replay_refuses_a_clip_missing_recorded_frames() {
-        let cfg = SelectionConfig {
-            mode: SelectionMode::Replay {
-                source: "prev.json".into(),
-            },
-            blur_floor: None,
-        };
-        let want = [0u64, 4, 40];
-        let mut s = make_selector(
-            &cfg,
-            ClipSelection {
-                replay: Some(&want),
-            },
-        )
-        .unwrap();
+        let mut s = make_selector(&cfg(replay(), None), Some(&[0, 4, 40])).unwrap();
         for i in 0..10 {
             s.push(fi(i, 1.0, 0));
         }
@@ -356,25 +331,9 @@ mod tests {
 
     #[test]
     fn replay_keeps_exactly_the_recorded_frames() {
-        let cfg = SelectionConfig {
-            mode: SelectionMode::Replay {
-                source: "prev.json".into(),
-            },
-            blur_floor: None,
-        };
         let want = [0u64, 4, 5, 9];
-        let mut s = make_selector(
-            &cfg,
-            ClipSelection {
-                replay: Some(&want),
-            },
-        )
-        .unwrap();
-        let mut all = vec![];
-        for i in 0..10 {
-            all.extend(s.push(fi(i, 1.0, 0)));
-        }
-        all.extend(s.finish().unwrap());
+        let mut s = make_selector(&cfg(replay(), None), Some(&want)).unwrap();
+        let all = decide(&mut *s, (0..10).map(|i| fi(i, 1.0, 0)));
         assert_eq!(kept(&all), want);
         assert_eq!(all.len(), 10, "every frame gets exactly one decision");
     }
@@ -382,50 +341,22 @@ mod tests {
     #[test]
     fn replay_ignores_the_blur_floor() {
         // Re-judging sharpness would drop frames a reconstruction references.
-        let cfg = SelectionConfig {
-            mode: SelectionMode::Replay {
-                source: "prev.json".into(),
-            },
-            blur_floor: Some(1000.0),
-        };
         let want = [1u64, 2];
-        let mut s = make_selector(
-            &cfg,
-            ClipSelection {
-                replay: Some(&want),
-            },
-        )
-        .unwrap();
-        let mut all = vec![];
-        for i in 0..4 {
-            all.extend(s.push(fi(i, 0.1, 0))); // far below the floor
-        }
+        let mut s = make_selector(&cfg(replay(), Some(1000.0)), Some(&want)).unwrap();
+        let all = decide(&mut *s, (0..4).map(|i| fi(i, 0.1, 0)));
         assert_eq!(kept(&all), want);
     }
 
     #[test]
     fn replay_without_a_frame_list_is_an_error() {
-        let cfg = SelectionConfig {
-            mode: SelectionMode::Replay {
-                source: "prev.json".into(),
-            },
-            blur_floor: None,
-        };
-        assert!(make_selector(&cfg, ClipSelection::default()).is_err());
+        assert!(make_selector(&cfg(replay(), None), None).is_err());
     }
 
     #[test]
     fn blur_floor_drops_regardless_of_mode() {
-        let cfg = SelectionConfig {
-            mode: SelectionMode::EveryNth { n: 1 },
-            blur_floor: Some(10.0),
-        };
-        let mut s = make_selector(&cfg, ClipSelection::default()).unwrap();
-        let mut all = vec![];
-        all.extend(s.push(fi(0, 50.0, 0)));
-        all.extend(s.push(fi(1, 5.0, 0))); // below floor
-        all.extend(s.push(fi(2, 50.0, 0)));
-        all.extend(s.finish().unwrap());
+        let every = SelectionMode::EveryNth { n: 1 };
+        let mut s = make_selector(&cfg(every, Some(10.0)), None).unwrap();
+        let all = decide(&mut *s, [fi(0, 50.0, 0), fi(1, 5.0, 0), fi(2, 50.0, 0)]);
         assert_eq!(kept(&all), vec![0, 2]);
     }
 }

@@ -7,7 +7,9 @@ use reconst_prep_core::mask::MaskClass;
 use crate::App;
 use crate::icons;
 use crate::preview::class_color;
-use crate::widgets::{category, check, check_enabled, mono, slider, subsection_beside, warn};
+use crate::widgets::{
+    Category, check, check_enabled, mono, slider, subsection_beside, warn, warn_icon,
+};
 
 /// The coloured dot beside a source, matching its tint in the preview overlay.
 fn dot(ui: &mut egui::Ui, class: MaskClass) {
@@ -21,76 +23,66 @@ fn dot(ui: &mut egui::Ui, class: MaskClass) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
-    category(
-        ui,
-        "cat_mask",
-        icons::MASKING,
-        "Masking",
-        None,
-        true,
-        |ui| {
-            let (mask_sky, sky) = (&mut app.cfg.mask_sky, &mut app.cfg.sky);
-            subsection_beside(
-                ui,
-                "sky_params",
-                "Sky",
-                "advanced options",
-                |ui| {
-                    dot(ui, MaskClass::Sky);
-                    check(ui, mask_sky, "Sky").on_hover_text(
-                        "Clouds move on their own. A reconstruction that tries to match them \
+    Category::new("cat_mask", icons::MASKING, "Masking").show(ui, |ui| {
+        let (mask_sky, sky) = (&mut app.cfg.mask_sky, &mut app.cfg.sky);
+        subsection_beside(
+            ui,
+            "sky_params",
+            "Sky",
+            |ui| {
+                dot(ui, MaskClass::Sky);
+                check(ui, mask_sky, "Sky").on_hover_text(
+                    "Clouds move on their own. A reconstruction that tries to match them \
                          puts the camera in the wrong place and leaves floating debris above \
                          the scene.",
-                    );
-                },
-                |ui| sky_params(ui, sky),
-            );
+                );
+            },
+            |ui| sky_params(ui, sky),
+        );
 
-            ui.add_space(4.0);
-            // Disabled without the model rather than checkable: the run would trip over it later.
-            let has_model = app.cfg.seg_model.is_some();
-            let downloading = app.models.downloading.clone();
-            let model_error = app.models.error.clone();
-            // The click is carried out of the closure: fetching needs the whole App, already borrowed here.
-            let mut download_clicked = false;
-            let (mask_people, seg_width, seg_temporal_window) = (
-                &mut app.cfg.mask_people,
-                &mut app.cfg.seg_width,
-                &mut app.cfg.seg_temporal_window,
-            );
-            subsection_beside(
-                ui,
-                "seg_params",
-                "People",
-                "advanced options",
-                |ui| {
-                    dot(ui, MaskClass::People);
-                    check_enabled(ui, has_model, mask_people, "People")
-                        .on_hover_text("Moving objects like people are best masked out.")
-                        .on_disabled_hover_text(
-                            "Needs the segmentation model — download it under advanced options.",
-                        );
-                    if !has_model {
-                        ui.colored_label(ui.visuals().warn_fg_color, icons::PROBLEM)
-                            .on_hover_text("Segmentation model is missing, please download it.");
-                    }
-                },
-                |ui| {
-                    model_row(
-                        ui,
-                        has_model,
-                        &downloading,
-                        &model_error,
-                        &mut download_clicked,
+        ui.add_space(4.0);
+        // Disabled without the model rather than checkable: the run would trip over it later.
+        let has_model = app.cfg.seg_model.is_some();
+        let downloading = app.models.downloading.clone();
+        let model_error = app.models.error.clone();
+        // The click is carried out of the closure: fetching needs the whole App, already borrowed here.
+        let mut download_clicked = false;
+        let (mask_people, seg_width, seg_temporal_window) = (
+            &mut app.cfg.mask_people,
+            &mut app.cfg.seg_width,
+            &mut app.cfg.seg_temporal_window,
+        );
+        subsection_beside(
+            ui,
+            "seg_params",
+            "People",
+            |ui| {
+                dot(ui, MaskClass::People);
+                check_enabled(ui, has_model, mask_people, "People")
+                    .on_hover_text("Moving objects like people are best masked out.")
+                    .on_disabled_hover_text(
+                        "Needs the segmentation model — download it under advanced options.",
                     );
-                    seg_params(ui, seg_width, seg_temporal_window)
-                },
-            );
-            if download_clicked && let Some(entry) = reconst_prep_core::models::CATALOGUE.first() {
-                app.fetch_model(entry, ctx);
-            }
-        },
-    );
+                if !has_model {
+                    warn_icon(ui)
+                        .on_hover_text("Segmentation model is missing, please download it.");
+                }
+            },
+            |ui| {
+                model_row(
+                    ui,
+                    has_model,
+                    &downloading,
+                    &model_error,
+                    &mut download_clicked,
+                );
+                seg_params(ui, seg_width, seg_temporal_window)
+            },
+        );
+        if download_clicked && let Some(entry) = reconst_prep_core::models::CATALOGUE.first() {
+            app.fetch_model(entry, ctx);
+        }
+    });
 }
 
 /// Takes the fields it edits rather than the whole `App`: two closures cannot both hold `&mut App`.
@@ -140,7 +132,7 @@ fn seg_params(ui: &mut egui::Ui, seg_width: &mut u32, seg_temporal_window: &mut 
         seg_width,
         256..=1280,
         "detail (px wide)",
-        crate::settings::Settings::default().seg_width,
+        reconst_prep_core::seg::DEFAULT_SEG_WIDTH,
         "How closely the model looks. A distant person is only a few pixels tall, so too \
          low a value misses them. Higher values cost time on every frame.",
     );
@@ -149,7 +141,7 @@ fn seg_params(ui: &mut egui::Ui, seg_width: &mut u32, seg_temporal_window: &mut 
         seg_temporal_window,
         1..=9,
         "steady over N frames",
-        crate::settings::Settings::default().seg_temporal_window,
+        reconst_prep_core::seg::DEFAULT_TEMPORAL_WINDOW,
         "Averages the mask over neighbouring frames. Raise it if the mask edge flickers \
          around a moving person.",
     );
@@ -183,8 +175,7 @@ fn model_row(
     };
     // The same warning symbol beside the disabled People checkbox, repeated on the row it points at.
     ui.horizontal(|ui| {
-        ui.colored_label(ui.visuals().warn_fg_color, icons::PROBLEM)
-            .on_hover_text("People masking cannot run until this is downloaded.");
+        warn_icon(ui).on_hover_text("People masking cannot run until this is downloaded.");
         if icons::button(ui, icons::DOWNLOAD, "Download model")
             .on_hover_text(format!(
                 "{}, {:.0} MB.\nLicence: {}.",

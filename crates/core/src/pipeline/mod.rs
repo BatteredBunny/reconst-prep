@@ -4,20 +4,20 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use sha2::Digest as _;
 
 use crate::decode::{ClipInfo, Ffmpeg, HwAccel, probe_clip};
+use crate::frame::Size;
 use crate::mask::MaskConfig;
 use crate::output::{ImageFormat, WriterPool};
 use crate::select::SelectionConfig;
-use crate::undistort::{Interp, ProfileSummary};
+use crate::undistort::{Interp, LensProfileFile};
 
 mod clip;
 mod manifest;
 
 use clip::{ClipJob, ClipRun, MaskDirs, Totals};
 
-pub use clip::{FrameAnalysis, analyze_frame, mask_and_sharpness, render_output};
+pub use clip::{FrameAnalysis, analyze_frame, render_output};
 
 pub use manifest::{ManifestClip, ManifestParams, ManifestProfile, ManifestTotals, RunManifest};
 
@@ -33,32 +33,54 @@ pub enum OutputSpec {
     Exact { width: u32, height: u32 },
 }
 
-/// Frontends check it while parsing, so a bad one fails there rather than after the first probe.
+/// Checked while parsing, so a bad one fails there rather than after the first probe.
 pub const MAX_SCALE: f64 = 8.0;
 
+/// `same`, a scale factor like `0.5`, or `WxH` like `1920x1080`.
+impl std::str::FromStr for OutputSpec {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        let bad = || {
+            anyhow::anyhow!("size must be \"same\", a scale factor like 0.5, or WxH like 1920x1080")
+        };
+        if s == "same" {
+            return Ok(OutputSpec::Same);
+        }
+        if let Some((w, h)) = s.split_once('x') {
+            return Ok(OutputSpec::Exact {
+                width: w.parse().map_err(|_| bad())?,
+                height: h.parse().map_err(|_| bad())?,
+            });
+        }
+        let factor: f64 = s.parse().map_err(|_| bad())?;
+        if !(factor > 0.0 && factor <= MAX_SCALE) {
+            bail!("scale factor must be above 0 and at most {MAX_SCALE}, not {factor}");
+        }
+        Ok(OutputSpec::Scale { factor })
+    }
+}
+
 impl OutputSpec {
-    pub fn resolve(&self, in_w: u32, in_h: u32) -> Result<(usize, usize)> {
+    pub fn resolve(&self, input: Size) -> Result<Size> {
         let (w, h) = match *self {
-            OutputSpec::Same => (in_w as usize, in_h as usize),
+            OutputSpec::Same => (input.w, input.h),
             OutputSpec::Scale { factor } => {
                 if !(factor > 0.0 && factor <= MAX_SCALE) {
                     bail!("scale factor {factor} out of range");
                 }
-                (
-                    ((in_w as f64 * factor).round() as usize).max(2),
-                    ((in_h as f64 * factor).round() as usize).max(2),
-                )
+                let scale = |v: u32| ((v as f64 * factor).round() as u32).max(2);
+                (scale(input.w), scale(input.h))
             }
-            OutputSpec::Exact { width, height } => (width as usize, height as usize),
+            OutputSpec::Exact { width, height } => (width, height),
         };
         // Even dimensions: friendlier to every downstream consumer.
-        Ok((w & !1, h & !1))
+        Ok(Size::new(w & !1, h & !1))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// Video files and/or directories of video files.
     pub inputs: Vec<PathBuf>,
     /// Gyroflow lens profile JSON. `None` disables undistortion entirely.
     pub profile_path: Option<PathBuf>,
@@ -100,6 +122,11 @@ pub struct Progress {
 }
 
 impl Progress {
+    /// Over what this invocation decoded, so a resume does not inflate it.
+    pub fn decode_fps(&self) -> f64 {
+        self.decoded_this_run as f64 / self.elapsed_s.max(1e-9)
+    }
+
     /// `None` when the clip length is unknown or nothing has decoded yet.
     pub fn clip_eta_s(&self, rate: f64) -> Option<f64> {
         let total = self.clip_total_frames?;
@@ -108,10 +135,21 @@ impl Progress {
     }
 }
 
+/// Why a run will not write into its output folder. Typed so each frontend can give its own advice:
+/// a flag for the CLI, a button for the GUI.
+#[derive(Debug, thiserror::Error)]
+pub enum OutDirConflict {
+    /// Writing would leave images from two selections side by side, with a manifest describing only the second.
+    #[error("{} already holds a dataset produced with different settings ({differences})", .dir.display())]
+    DifferentDataset { dir: PathBuf, differences: String },
+    /// Resuming would mix two selections into one dataset.
+    #[error("{} cannot be resumed: it was produced with different settings ({differences})", .dir.display())]
+    ResumeRefused { dir: PathBuf, differences: String },
+}
+
 /// The video containers a directory scan accepts, case-insensitively.
 pub const VIDEO_EXT: &[&str] = &["mp4", "mov", "mkv", "avi", "mts", "m2ts", "webm"];
 
-/// Expand files/directories into a sorted list of video files.
 pub fn expand_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for input in inputs {
@@ -164,7 +202,6 @@ fn dedupe_stems(stems: &mut [String]) {
     }
 }
 
-/// Resolve one of the pipeline's "0 = auto" thread counts.
 fn threads(requested: usize, auto: impl FnOnce() -> usize) -> usize {
     if requested == 0 { auto() } else { requested }
 }
@@ -172,9 +209,11 @@ fn threads(requested: usize, auto: impl FnOnce() -> usize) -> usize {
 /// Resolved before a frame is decoded, so a bad profile fails immediately rather than half an hour in.
 struct Preflight {
     ff: Ffmpeg,
-    profile_json: Option<String>,
+    lens: Option<LensProfileFile>,
     profile: Option<ManifestProfile>,
     clips: Vec<ClipInfo>,
+    /// Decided once here: deciding per clip let the manifest disagree with the next run's prediction.
+    gpu: Option<usize>,
     /// Per-clip frame lists keyed by output stem. Replay selection only.
     replay: HashMap<String, Vec<u64>>,
 }
@@ -182,26 +221,19 @@ struct Preflight {
 fn preflight(cfg: &PipelineConfig) -> Result<Preflight> {
     let ff = Ffmpeg::resolve(cfg.ffmpeg_path.as_deref())?;
 
-    let (profile_json, profile) = match &cfg.profile_path {
-        Some(path) => {
-            let json = std::fs::read_to_string(path)
-                .with_context(|| format!("reading lens profile {}", path.display()))?;
-            let sha256 = {
-                let mut h = sha2::Sha256::new();
-                h.update(json.as_bytes());
-                crate::paths::hex(&h.finalize())
-            };
-            // Parse once so a bad profile fails before any decoding.
-            let probe = ProfileSummary::validate(&json).context("lens profile rejected")?;
-            let profile = ManifestProfile {
-                path: path.display().to_string(),
-                name: probe.name,
-                sha256,
-            };
-            (Some(json), Some(profile))
-        }
-        None => (None, None),
-    };
+    let lens = cfg
+        .profile_path
+        .as_deref()
+        .map(LensProfileFile::load)
+        .transpose()?;
+    let profile = lens
+        .as_ref()
+        .zip(cfg.profile_path.as_ref())
+        .map(|(l, path)| ManifestProfile {
+            path: path.display().to_string(),
+            name: l.summary().name.clone(),
+            sha256: l.sha256().to_string(),
+        });
 
     let files = expand_inputs(&cfg.inputs)?;
     let mut clips: Vec<ClipInfo> = files
@@ -209,6 +241,8 @@ fn preflight(cfg: &PipelineConfig) -> Result<Preflight> {
         .map(|f| probe_clip(&ff, f))
         .collect::<Result<_>>()?;
     unique_stems(&mut clips);
+
+    let gpu = gpu_device(cfg, lens.as_ref(), &clips[0])?;
 
     // Keyed by stem rather than path: the clips may have moved, and the stem is what the output filenames carry.
     let replay = match &cfg.frames_from {
@@ -237,14 +271,36 @@ fn preflight(cfg: &PipelineConfig) -> Result<Preflight> {
 
     Ok(Preflight {
         ff,
-        profile_json,
+        lens,
         profile,
         clips,
+        gpu,
         replay,
     })
 }
 
-/// Create the mask sidecar directories, one per consumer, once per run.
+/// gyroflow only finds out whether a listed device works by rendering, so one frame of the first clip's geometry is rendered here.
+fn gpu_device(
+    cfg: &PipelineConfig,
+    lens: Option<&LensProfileFile>,
+    first: &ClipInfo,
+) -> Result<Option<usize>> {
+    let Some(lens) = lens.filter(|_| cfg.gpu) else {
+        return Ok(None);
+    };
+    let devices = crate::undistort::gpu_devices();
+    let Some(name) = devices.first() else {
+        log::warn!("GPU undistortion: no device found; using the CPU kernel");
+        return Ok(None);
+    };
+    let params = lens.params(first.size, cfg.output_size.resolve(first.size)?)?;
+    if !crate::undistort::gpu_usable(&params, cfg.interp, 0) {
+        return Ok(None);
+    }
+    log::info!("GPU undistortion on {name}");
+    Ok(Some(0))
+}
+
 fn mask_dirs(cfg: &PipelineConfig) -> Result<MaskDirs> {
     let writing = cfg.mask.is_active();
     let dirs = MaskDirs {
@@ -262,9 +318,7 @@ fn mask_dirs(cfg: &PipelineConfig) -> Result<MaskDirs> {
     Ok(dirs)
 }
 
-/// The parameters of this run, as they will be recorded.
-fn manifest_params(cfg: &PipelineConfig) -> ManifestParams {
-    let gpu = cfg.gpu && cfg.profile_path.is_some() && !crate::undistort::gpu_devices().is_empty();
+fn manifest_params(cfg: &PipelineConfig, gpu: bool) -> ManifestParams {
     ManifestParams {
         output_size: cfg.output_size,
         format: cfg.format,
@@ -285,30 +339,18 @@ fn resume_source(
     let Some(previous) = RunManifest::read_from_dir(&cfg.out_dir)? else {
         return Ok(None);
     };
-    if !cfg.resume {
+    let Some(differences) = manifest::parameter_mismatch(&previous, params, pre.profile.as_ref())
+    else {
         // Writing over a dataset made by the same rules only replaces files.
-        // Different rules leave the old images in place beside the new ones,
-        // with a manifest that describes only the second run.
-        if let Some(diff) = manifest::parameter_mismatch(&previous, params, pre.profile.as_ref()) {
-            bail!(
-                "{} already holds a dataset produced with different settings. \
-                 Differences: {diff}.\n\
-                 Writing into it would leave images from two selections side by side. \
-                 Use a different --out, or empty this one first.",
-                cfg.out_dir.display()
-            );
-        }
-        return Ok(None);
+        return Ok(cfg.resume.then_some(previous));
+    };
+    let dir = cfg.out_dir.clone();
+    Err(if cfg.resume {
+        OutDirConflict::ResumeRefused { dir, differences }
+    } else {
+        OutDirConflict::DifferentDataset { dir, differences }
     }
-    if let Some(diff) = manifest::parameter_mismatch(&previous, params, pre.profile.as_ref()) {
-        bail!(
-            "--resume refused: {} was produced with different settings. Differences: {diff}.\n\
-             Resuming would mix two selections into one dataset. Use a different \
-             --out, or drop --resume to start over.",
-            cfg.out_dir.display()
-        );
-    }
-    Ok(Some(previous))
+    .into())
 }
 
 /// `wall` is 0.0 for the per-clip rewrite: the run has not finished, so there is no rate to report yet.
@@ -332,7 +374,7 @@ pub fn run_pipeline(
 ) -> Result<RunManifest> {
     let t0 = Instant::now();
     let pre = preflight(cfg)?;
-    let params = manifest_params(cfg);
+    let params = manifest_params(cfg, pre.gpu.is_some());
 
     std::fs::create_dir_all(&cfg.out_dir)
         .with_context(|| format!("creating output dir {}", cfg.out_dir.display()))?;
@@ -353,6 +395,8 @@ pub fn run_pipeline(
         n_clips: pre.clips.len(),
         t0,
         cancel,
+        lens: pre.lens.as_ref(),
+        gpu: pre.gpu,
     };
 
     let mut manifest = RunManifest::new(pre.ff.version.clone(), pre.profile.clone(), params);
@@ -376,18 +420,16 @@ pub fn run_pipeline(
             continue;
         }
 
-        let outcome = run.process(
+        let record = run.process(
             ClipJob {
                 idx: clip_idx,
                 info: clip,
-                profile_json: pre.profile_json.as_deref(),
                 replay: pre.replay.get(&clip.stem).map(|v| v.as_slice()),
             },
             &mut totals,
             progress,
         )?;
-        manifest.params.gpu = manifest.params.gpu && outcome.gpu_used;
-        manifest.clips.push(outcome.record);
+        manifest.clips.push(record);
 
         // Rewritten after every clip so a killed run stays resumable: the file always describes the clips that finished.
         writers.drain()?;
@@ -400,7 +442,7 @@ pub fn run_pipeline(
         bail!("zero frames selected. Are the selection thresholds too strict for this footage?");
     }
     if totals.carried_clips > 0 {
-        eprintln!(
+        log::info!(
             "resumed: {} of {} clips were already complete in {}",
             totals.carried_clips,
             pre.clips.len(),
@@ -421,44 +463,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_that_cannot_undistort_records_no_gpu() {
-        let cfg = PipelineConfig {
-            inputs: vec![],
-            profile_path: None,
-            out_dir: PathBuf::new(),
-            output_size: OutputSpec::Same,
-            format: ImageFormat::Jpeg { quality: 95 },
-            selection: SelectionConfig::default(),
-            hwaccel: HwAccel::Auto,
-            ffmpeg_path: None,
-            interp: Interp::Bilinear,
-            gpu: true,
-            mask: MaskConfig::default(),
-            writer_threads: 0,
-            undistort_threads: 0,
-            resume: false,
-            frames_from: None,
-        };
-        assert!(!manifest_params(&cfg).gpu);
-    }
-
-    #[test]
-    fn output_spec_resolves_even_dims() {
-        assert_eq!(
-            OutputSpec::Scale { factor: 0.5 }
-                .resolve(3840, 2880)
-                .unwrap(),
-            (1920, 1440)
-        );
-        assert_eq!(
-            OutputSpec::Exact {
-                width: 1919,
-                height: 1079
-            }
-            .resolve(3840, 2880)
-            .unwrap(),
-            (1918, 1078)
-        );
+    fn output_spec_parses_and_resolves_to_even_dims() {
+        let input = Size::new(3840, 2880);
+        let resolve = |s: &str| s.parse::<OutputSpec>().unwrap().resolve(input).unwrap();
+        assert_eq!(resolve("same"), input);
+        assert_eq!(resolve("0.5"), Size::new(1920, 1440));
+        assert_eq!(resolve("1919X1079"), Size::new(1918, 1078));
+        for bad in ["0", "9", "big"] {
+            assert!(bad.parse::<OutputSpec>().is_err(), "{bad}");
+        }
     }
 
     /// Every frame index two clips share would otherwise be written twice, and which wins is a race.

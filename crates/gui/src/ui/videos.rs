@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::App;
 use crate::icons::{self, icon_button};
-use crate::widgets::{category, mmss, mono, short_name, warn};
+use crate::widgets::{Category, mmss, mono, short_name, warn};
 
 /// The decoded copy is larger (`preview::THUMB_W`) so it stays sharp at 2x scaling.
 const THUMB: egui::Vec2 = egui::vec2(96.0, 54.0);
@@ -18,7 +18,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     } else {
         format!("Videos ({n})")
     };
-    category(ui, "cat_videos", icons::VIDEOS, &title, None, true, |ui| {
+    Category::new("cat_videos", icons::VIDEOS, &title).show(ui, |ui| {
         ui.horizontal(|ui| {
             if icons::button(ui, icons::ADD_FILES, "Add files…").clicked()
                 && let Some(files) = rfd::FileDialog::new()
@@ -37,13 +37,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             {
                 app.clips.add(dir);
             }
-            if !app.clips.inputs.is_empty()
+            if !app.clips.inputs().is_empty()
                 && icons::button(ui, icons::CLEAR, "Clear")
                     .on_hover_text("Remove every clip in the list.")
                     .clicked()
             {
                 app.clips.clear();
-                app.preview = None;
+                app.preview.data = None;
             }
         });
 
@@ -57,7 +57,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     sizes.len(),
                     sizes
                         .iter()
-                        .map(|(w, h)| format!("{w}×{h}"))
+                        .map(|s| format!("{}×{}", s.w, s.h))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -74,7 +74,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     // Borrowed, not copied: both decisions a row can produce are carried out after the loop.
                     let app = &*app;
                     for (i, path) in app.clips.files().iter().enumerate() {
-                        match row(app, ui, path, i == app.preview_clip) {
+                        match row(app, ui, path, i == app.preview.clip) {
                             Some(Action::Select) => select = Some(i),
                             Some(Action::Remove) => remove = Some(path.clone()),
                             None => {}
@@ -84,12 +84,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
 
         if let Some(i) = select {
-            app.preview_clip = i;
+            app.preview.clip = i;
         }
         if let Some(p) = remove {
             app.clips.remove(&p);
-            app.preview_clip = app
-                .preview_clip
+            app.preview.clip = app
+                .preview
+                .clip
                 .min(app.clips.files().len().saturating_sub(1));
         }
     });
@@ -120,7 +121,7 @@ fn row(app: &App, ui: &mut egui::Ui, path: &std::path::Path, selected: bool) -> 
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(3.0);
-                    if app.clips.inputs.iter().any(|i| i == path)
+                    if app.clips.inputs().iter().any(|i| i == path)
                         && icon_button(ui, icons::REMOVE, "Remove this clip").clicked()
                     {
                         action = Some(Action::Remove);
@@ -159,7 +160,7 @@ fn row(app: &App, ui: &mut egui::Ui, path: &std::path::Path, selected: bool) -> 
 
 /// Or a placeholder of exactly the same size, so the row does not change height when the decode lands.
 fn thumbnail(app: &App, ui: &mut egui::Ui, path: &std::path::Path) {
-    match app.clips.thumbs.get(path) {
+    match app.clips.thumb(path) {
         Some(Some(tex)) => {
             ui.add(egui::Image::new((tex.id(), THUMB)).corner_radius(2));
         }
@@ -201,7 +202,7 @@ fn meta(app: &App, ui: &mut egui::Ui, path: &std::path::Path) {
     let line = |ui: &mut egui::Ui, text: String| {
         ui.label(mono(text).weak().size(10.0));
     };
-    match app.clips.probes.get(path) {
+    match app.clips.probe(path) {
         Some(Ok(info)) => {
             let duration = info.duration_s.map(mmss).unwrap_or_else(|| "-".to_string());
             line(
@@ -210,7 +211,7 @@ fn meta(app: &App, ui: &mut egui::Ui, path: &std::path::Path) {
             );
             line(
                 ui,
-                format!("{}×{} · {:.2} fps", info.width, info.height, info.fps),
+                format!("{}×{} · {:.2} fps", info.size.w, info.size.h, info.fps),
             );
         }
         None if app.clips.probing(path) => {

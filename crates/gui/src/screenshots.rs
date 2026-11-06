@@ -13,7 +13,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{AccessKitNode, NodeT as _, Queryable as _};
 
 use crate::settings::Settings;
-use crate::{App, ModeChoice, SizeChoice, Start, theme};
+use crate::settings::{ModeChoice, SizeChoice};
+use crate::{App, Start, theme};
 
 const WINDOW: egui::Vec2 = egui::vec2(1280.0, 720.0);
 /// Twice the point layout, so text stays sharp on HiDPI screens and the collage never scales a shot up.
@@ -46,7 +47,7 @@ const SCENES: &[Scene] = &[
             app.cfg.undistort = app.cfg.profile.is_some();
             app.cfg.mask_sky = true;
             app.cfg.mask_people = app.cfg.seg_model.is_some();
-            app.view.wipe = 0.5;
+            app.preview.view.wipe = 0.5;
         },
         ready: |_| true,
         crop: None,
@@ -58,7 +59,7 @@ const SCENES: &[Scene] = &[
                 "Drag to compare before and after",
                 Inside("Before and after", |app, r| {
                     egui::pos2(
-                        r.lerp_inside(egui::vec2(app.view.wipe, 0.5)).x,
+                        r.lerp_inside(egui::vec2(app.preview.view.wipe, 0.5)).x,
                         r.center().y,
                     )
                 }),
@@ -69,7 +70,7 @@ const SCENES: &[Scene] = &[
                 "Scrub through the clip",
                 Inside("Position in the clip", |app, r| {
                     egui::pos2(
-                        r.lerp_inside(egui::vec2(app.preview_pos as f32, 0.0)).x,
+                        r.lerp_inside(egui::vec2(app.preview.pos as f32, 0.0)).x,
                         r.top(),
                     )
                 }),
@@ -84,7 +85,7 @@ const SCENES: &[Scene] = &[
             let app = &mut h.state_mut().app;
             app.cfg.mask_sky = false;
             app.cfg.mask_people = false;
-            app.view.wipe = 0.5;
+            app.preview.view.wipe = 0.5;
         },
         ready: |_| true,
         crop: Some(&["Lens correction section", "interpolation"]),
@@ -108,7 +109,7 @@ const SCENES: &[Scene] = &[
             let app = &mut h.state_mut().app;
             app.cfg.mask_sky = true;
             app.cfg.mask_people = app.cfg.seg_model.is_some();
-            app.view.wipe = 0.3;
+            app.preview.view.wipe = 0.3;
         },
         ready: |_| true,
         crop: Some(&["Masking section"]),
@@ -483,7 +484,7 @@ fn wait_until(harness: &mut Harness<'_, Shot>, what: &str, done: impl Fn(&App) -
     loop {
         harness.step();
         let app = &harness.state().app;
-        if let Some(e) = &app.preview_error {
+        if let Some(e) = &app.preview.job.error {
             panic!("{what}: preview failed: {e}");
         }
         if done(app) {
@@ -501,10 +502,15 @@ fn preview_finished(app: &App) -> bool {
         .clips
         .files()
         .iter()
-        .all(|f| app.clips.thumbs.contains_key(f));
-    let current = app.previewed.is_some() && app.previewed == app.preview_request();
-    let finished = app.preview.as_ref().is_some_and(|p| p.sharpness.is_some());
-    thumbs_in && current && finished && !app.preview_busy && app.preview_stage.is_none()
+        .all(|f| app.clips.thumb(f).is_some());
+    let current =
+        app.preview.job.previewed.is_some() && app.preview.job.previewed == app.preview_request();
+    let finished = app
+        .preview
+        .data
+        .as_ref()
+        .is_some_and(|p| p.sharpness.is_some());
+    thumbs_in && current && finished && !app.preview.job.busy && app.preview.job.stage.is_none()
 }
 
 /// Logs where callouts land and the accessibility tree, for finding what to name a target.

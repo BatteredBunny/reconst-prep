@@ -1,3 +1,4 @@
+use reconst_prep_core::frame::{Rgb8, Size};
 use reconst_prep_core::mask::MaskClass;
 use reconst_prep_core::seg::{SegClassParams, SegConfig, SegModel};
 
@@ -161,7 +162,7 @@ fn identity_model() -> Vec<u8> {
 // --- test images ----------------------------------------------------------
 
 /// Blue top half (class 2 = sky), green bottom half (class 1).
-fn sky_over_green(w: u32, h: u32) -> Vec<u8> {
+fn sky_over_green(w: u32, h: u32) -> Rgb8 {
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h {
         for _ in 0..w {
@@ -172,7 +173,7 @@ fn sky_over_green(w: u32, h: u32) -> Vec<u8> {
             }
         }
     }
-    rgb
+    Rgb8::new(Size::new(w, h), rgb).unwrap()
 }
 
 fn seg_config(width: u32, temporal_window: u32) -> SegConfig {
@@ -197,12 +198,13 @@ fn seg_config(width: u32, temporal_window: u32) -> SegConfig {
 fn identity_model_maps_channels_to_classes() {
     let path = write_model("identity", &identity_model());
     let cfg = seg_config(64, 1);
-    let model = SegModel::load(&path, &cfg, 64, 64).expect("loading the hand-built model");
-    assert_eq!(model.size(), (64, 64));
+    let model =
+        SegModel::load(&path, &cfg, Size::new(64, 64)).expect("loading the hand-built model");
+    assert_eq!(model.size(), Size::new(64, 64));
     assert_eq!(model.n_classes(), 3);
 
     let rgb = sky_over_green(64, 64);
-    let labels = model.labels(&rgb, 64, 64).expect("inference");
+    let labels = model.labels(&rgb).expect("inference");
     assert_eq!(labels.data[0], 2, "top row is blue, i.e. class 2");
     assert_eq!(labels.data[63 * 64], 1, "bottom row is green, i.e. class 1");
 
@@ -244,13 +246,13 @@ fn logits_at_a_lower_stride_are_upsampled_to_input_size() {
     );
     let path = write_model("maxpool", &bytes);
     let cfg = seg_config(64, 1);
-    let model = SegModel::load(&path, &cfg, 64, 64).expect("loading the strided model");
+    let model = SegModel::load(&path, &cfg, Size::new(64, 64)).expect("loading the strided model");
 
     let rgb = sky_over_green(64, 64);
-    let labels = model.labels(&rgb, 64, 64).expect("inference");
+    let labels = model.labels(&rgb).expect("inference");
     assert_eq!(
-        (labels.w, labels.h),
-        (64, 64),
+        labels.size,
+        Size::new(64, 64),
         "labels must be upsampled back to the inference input size"
     );
     assert_eq!(labels.data.len(), 64 * 64);
@@ -270,7 +272,8 @@ fn a_wrong_class_id_is_rejected_at_load_time() {
         people: None,
         ..seg_config(64, 1)
     };
-    let err = SegModel::load(&path, &cfg, 64, 64).expect_err("class 99 of 3 must be rejected");
+    let err =
+        SegModel::load(&path, &cfg, Size::new(64, 64)).expect_err("class 99 of 3 must be rejected");
     let msg = format!("{err:#}");
     assert!(msg.contains("3 classes"), "unhelpful message: {msg}");
 }
@@ -289,7 +292,7 @@ fn a_model_that_is_not_a_segmentation_net_is_rejected() {
         ("y", &[1, 3]),
     );
     let path = write_model("not-seg", &bytes);
-    let err = SegModel::load(&path, &seg_config(64, 1), 64, 64)
+    let err = SegModel::load(&path, &seg_config(64, 1), Size::new(64, 64))
         .expect_err("a rank-2 model must be rejected");
     let msg = format!("{err:#}");
     assert!(

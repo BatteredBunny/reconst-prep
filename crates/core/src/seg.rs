@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use tract_onnx::prelude::*;
 
+use crate::frame::{Rgb8, Size};
 use crate::gray::{nn_scale, resize_rgb};
 use crate::mask::{Mask, MaskClass};
 
@@ -74,7 +75,7 @@ impl Default for SegConfig {
             width: DEFAULT_SEG_WIDTH,
             sky: None,
             people: None,
-            temporal_window: 1,
+            temporal_window: DEFAULT_TEMPORAL_WINDOW,
         }
     }
 }
@@ -100,8 +101,7 @@ impl SegConfig {
 /// One frame's per-pixel label map at inference resolution.
 #[derive(Clone, Debug)]
 pub struct SegLabels {
-    pub w: u32,
-    pub h: u32,
+    pub size: Size,
     pub data: Vec<u8>,
 }
 
@@ -111,8 +111,8 @@ type Plan = std::sync::Arc<TypedSimplePlan>;
 /// Bound to one input geometry. Stateless, so one instance is shared by every worker.
 pub struct SegModel {
     plan: Plan,
-    /// Inference input size, (w, h).
-    size: (u32, u32),
+    /// Inference input size.
+    size: Size,
     /// Number of label channels the model emits.
     n_classes: usize,
     /// Some exports prepend a background channel, shifting every ADE20K id.
@@ -124,19 +124,18 @@ impl std::fmt::Debug for SegModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "SegModel({}x{}, {} classes, id offset {})",
-            self.size.0, self.size.1, self.n_classes, self.class_offset
+            "SegModel({}, {} classes, id offset {})",
+            self.size, self.n_classes, self.class_offset
         )
     }
 }
 
 impl SegModel {
     /// Only the frame aspect is used, to pick a height for the configured width.
-    pub fn load(path: &Path, cfg: &SegConfig, frame_w: u32, frame_h: u32) -> Result<Self> {
-        ensure!(frame_w > 0 && frame_h > 0, "zero frame size");
+    pub fn load(path: &Path, cfg: &SegConfig, frame: Size) -> Result<Self> {
+        ensure!(!frame.is_empty(), "zero frame size");
         let want_w = round_up_32(cfg.width.max(32));
-        let want_h =
-            round_up_32(((frame_h as u64 * want_w as u64) / frame_w as u64).max(32) as u32);
+        let want_h = round_up_32(frame.at_width(want_w).h.max(32));
 
         let model = tract_onnx::onnx()
             .model_for_path(path)
@@ -187,6 +186,13 @@ impl SegModel {
             );
         }
         let n_classes = shape[1];
+        // Labels are stored one byte per pixel, so a larger label set would silently alias classes.
+        if n_classes > 256 {
+            bail!(
+                "{}: the model emits {n_classes} classes; at most 256 are supported",
+                path.display()
+            );
+        }
         // 151 = ADE20K with a background channel prepended, shifting every id.
         let class_offset = usize::from(n_classes == 151);
         let max_id = cfg
@@ -205,14 +211,14 @@ impl SegModel {
 
         Ok(Self {
             plan,
-            size: (in_w, in_h),
+            size: Size::new(in_w, in_h),
             n_classes,
             class_offset,
             cfg: cfg.clone(),
         })
     }
 
-    pub fn size(&self) -> (u32, u32) {
+    pub fn size(&self) -> Size {
         self.size
     }
 
@@ -221,19 +227,16 @@ impl SegModel {
     }
 
     /// Stateless: safe to call from several workers at once.
-    pub fn labels(&self, rgb: &[u8], w: u32, h: u32) -> Result<SegLabels> {
-        let (iw, ih) = self.size;
-        ensure!(
-            rgb.len() >= (w as usize) * (h as usize) * 3,
-            "segmentation input buffer too small"
-        );
-        let scaled = if (w, h) == (iw, ih) {
+    pub fn labels(&self, rgb: &Rgb8) -> Result<SegLabels> {
+        let frame = rgb.size();
+        let scaled = if frame == self.size {
             std::borrow::Cow::Borrowed(rgb)
         } else {
-            std::borrow::Cow::Owned(resize_rgb(rgb, w, h, iw, ih)?)
+            std::borrow::Cow::Owned(resize_rgb(rgb, self.size)?)
         };
+        let scaled = scaled.data();
 
-        let (iw_u, ih_u) = (iw as usize, ih as usize);
+        let (iw_u, ih_u) = self.size.as_usize();
         let input = tract_ndarray::Array4::from_shape_fn((1, 3, ih_u, iw_u), |(_, c, y, x)| {
             let v = scaled[(y * iw_u + x) * 3 + c] as f32 / 255.0;
             (v - MEAN[c]) / STD[c]
@@ -268,15 +271,19 @@ impl SegModel {
                         best = c;
                     }
                 }
-                small[y * ow + x] = best.min(u8::MAX as usize) as u8;
+                small[y * ow + x] = best as u8;
             }
         }
-        let data = if (ow, oh) == (iw_u, ih_u) {
+        let out_size = Size::new(ow as u32, oh as u32);
+        let data = if out_size == self.size {
             small
         } else {
-            nn_scale(&small, ow as u32, oh as u32, iw, ih)
+            nn_scale(&small, out_size, self.size)
         };
-        Ok(SegLabels { w: iw, h: ih, data })
+        Ok(SegLabels {
+            size: self.size,
+            data,
+        })
     }
 
     /// `0` = ignore, matching `Mask`.
@@ -287,8 +294,7 @@ impl SegModel {
             .map(|(class, p)| {
                 let id = (p.class_id + self.class_offset) as u8;
                 let mut mask = Mask {
-                    w: labels.w,
-                    h: labels.h,
+                    size: labels.size,
                     data: labels
                         .data
                         .iter()
@@ -321,7 +327,7 @@ impl SegSmoother {
         if self.window <= 1 {
             return labels;
         }
-        let (w, h) = (labels.w, labels.h);
+        let size = labels.size;
         self.history.push_back(labels.data);
         if self.history.len() > self.window {
             self.history.pop_front();
@@ -348,7 +354,7 @@ impl SegSmoother {
             }
             *o = best.0;
         }
-        SegLabels { w, h, data: out }
+        SegLabels { size, data: out }
     }
 }
 
@@ -377,8 +383,7 @@ mod tests {
 
     fn labels(data: &[u8]) -> SegLabels {
         SegLabels {
-            w: data.len() as u32,
-            h: 1,
+            size: Size::new(data.len() as u32, 1),
             data: data.to_vec(),
         }
     }

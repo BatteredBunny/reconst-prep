@@ -35,7 +35,7 @@ pub fn config_column(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
 /// Pinned to the bottom of the config column. See `App::ui`.
 pub fn run_controls(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.add_space(4.0);
-    let blocker = app.not_ready_reason();
+    let blocker = app.run_config().err();
     let ready = blocker.is_none() && !app.running;
     // Resuming is not a mode ticked beforehand: it means something only when the folder holds an unfinished dataset.
     let can_resume = ready && app.can_resume_here();

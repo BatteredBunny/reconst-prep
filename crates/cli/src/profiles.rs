@@ -10,7 +10,15 @@ use crate::out;
 pub fn run(cmd: ProfileCmd) -> Result<()> {
     match cmd {
         ProfileCmd::Search { terms, offline } => {
-            let entries = profiles::index(offline, false)?;
+            let entries = profiles::index(offline, false).map_err(|e| {
+                if offline {
+                    e.context(
+                        "--offline needs a cached index: run `reconst-prep profiles update` once",
+                    )
+                } else {
+                    e
+                }
+            })?;
             let hits = profiles::search(&entries, &terms.join(" "));
             if hits.is_empty() {
                 eprintln!("no profiles match. Try fewer or broader terms.");

@@ -1,5 +1,7 @@
 // Lens-only undistortion via gyroflow-core's CPU kernel
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use gyroflow_core::gpu::{BufferDescription, BufferSource, Buffers};
 use gyroflow_core::lens_profile::LensProfile;
@@ -7,25 +9,93 @@ use gyroflow_core::stabilization::{
     ComputeParams, GPU_LIST, Interpolation, PixelType, RGB8, RGBA8, Stabilization,
     distortion_models::DistortionModel,
 };
+use sha2::Digest as _;
 
-/// One per clip, since clips may differ in size.
+use crate::frame::{Rgb8, Size};
+
+/// One per clip, since clips may differ in size. Only built from a [`LensProfileFile`], which has already checked the profile.
 pub struct LensOnlyParams {
-    pub lens: LensProfile,
-    pub in_w: usize,
-    pub in_h: usize,
-    pub out_w: usize,
-    pub out_h: usize,
+    lens: LensProfile,
+    input: Size,
+    output: Size,
+}
+
+/// A lens profile read and checked once, then shared by every clip and preview.
+#[derive(Clone)]
+pub struct LensProfileFile {
+    lens: LensProfile,
+    sha256: String,
+    summary: ProfileSummary,
+}
+
+impl LensProfileFile {
+    pub fn load(path: &Path) -> Result<Self> {
+        let json = std::fs::read_to_string(path)
+            .with_context(|| format!("reading lens profile {}", path.display()))?;
+        Self::parse(&json).with_context(|| format!("lens profile {} rejected", path.display()))
+    }
+
+    /// Takes raw JSON, not a path: gyroflow's `load_from_file` routes through a VFS layer we must not touch.
+    pub fn parse(json: &str) -> Result<Self> {
+        // Never bare serde: from_json also runs init(), computing the r_limit that culls pixels past the monotonic radius.
+        let lens = LensProfile::from_json(json)
+            .map_err(|e| anyhow::anyhow!("lens profile parse failed: {e}"))?;
+        if lens.fisheye_params.distortion_coeffs.is_empty() {
+            bail!("lens profile has no distortion coefficients");
+        }
+        if lens.calib_dimension.w == 0 || lens.calib_dimension.h == 0 {
+            bail!("lens profile has no calibration dimensions");
+        }
+        let summary = ProfileSummary {
+            name: lens.name.clone(),
+            camera: format!("{} {}", lens.camera_brand, lens.camera_model)
+                .trim()
+                .to_string(),
+            calib: Size::new(lens.calib_dimension.w as u32, lens.calib_dimension.h as u32),
+            fps: lens.fps,
+        };
+        let sha256 = crate::paths::hex(&sha2::Sha256::digest(json.as_bytes()));
+        Ok(Self {
+            lens,
+            sha256,
+            summary,
+        })
+    }
+
+    pub fn summary(&self) -> &ProfileSummary {
+        &self.summary
+    }
+
+    /// Of the file's bytes, so a resume can tell whether the profile changed.
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub fn params(&self, input: Size, output: Size) -> Result<LensOnlyParams> {
+        if input.is_empty() || output.is_empty() {
+            bail!("zero input/output dimensions");
+        }
+        Ok(LensOnlyParams {
+            lens: self.lens.clone(),
+            input,
+            output,
+        })
+    }
 }
 
 /// Bilinear by default: under a 2:1 downscale all three register within 0.004 px of a Gyroflow app export, at 30.5 fps against Lanczos4's 18.5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Interp {
     Bilinear,
     Bicubic,
+    #[serde(alias = "lanczos")]
     Lanczos4,
 }
 
 impl Interp {
+    pub const ALL: [Interp; 3] = [Interp::Bilinear, Interp::Bicubic, Interp::Lanczos4];
+
     fn to_gf(self) -> Interpolation {
         match self {
             Interp::Bilinear => Interpolation::Bilinear,
@@ -42,15 +112,13 @@ impl Interp {
     }
 }
 
+/// The serde spelling, so the flag, the settings file and the manifest accept the same names.
 impl std::str::FromStr for Interp {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "bilinear" => Ok(Interp::Bilinear),
-            "bicubic" => Ok(Interp::Bicubic),
-            "lanczos4" | "lanczos" => Ok(Interp::Lanczos4),
-            other => bail!("unknown interpolation {other:?} (bilinear|bicubic|lanczos4)"),
-        }
+    type Err = serde::de::value::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use serde::Deserialize as _;
+        use serde::de::IntoDeserializer as _;
+        Self::deserialize(s.to_ascii_lowercase().into_deserializer())
     }
 }
 
@@ -60,35 +128,6 @@ fn stretch(v: f64) -> f64 {
 }
 
 impl LensOnlyParams {
-    /// Takes raw JSON, not a path: gyroflow's `load_from_file` routes through a VFS layer we must not touch.
-    pub fn new(
-        profile_json: &str,
-        in_w: usize,
-        in_h: usize,
-        out_w: usize,
-        out_h: usize,
-    ) -> Result<Self> {
-        // Never bare serde: from_json also runs init(), computing the r_limit that culls pixels past the monotonic radius.
-        let lens = LensProfile::from_json(profile_json)
-            .map_err(|e| anyhow::anyhow!("lens profile parse failed: {e}"))?;
-        if lens.fisheye_params.distortion_coeffs.is_empty() {
-            bail!("lens profile has no distortion coefficients");
-        }
-        if lens.calib_dimension.w == 0 || lens.calib_dimension.h == 0 {
-            bail!("lens profile has no calibration dimensions");
-        }
-        if in_w == 0 || in_h == 0 || out_w == 0 || out_h == 0 {
-            bail!("zero input/output dimensions");
-        }
-        Ok(Self {
-            lens,
-            in_w,
-            in_h,
-            out_w,
-            out_h,
-        })
-    }
-
     /// Field-by-field on purpose: upstream has no constructor, and two Default values are actively wrong.
     #[allow(clippy::field_reassign_with_default)]
     fn compute_params(&self) -> ComputeParams {
@@ -110,10 +149,8 @@ impl LensOnlyParams {
         cp.lens = self.lens.clone();
 
         // INPUT frame size: never rescale the camera matrix ourselves, get_lens_data_at_timestamp does it.
-        cp.width = self.in_w;
-        cp.height = self.in_h;
-        cp.output_width = self.out_w;
-        cp.output_height = self.out_h;
+        (cp.width, cp.height) = self.input.as_usize();
+        (cp.output_width, cp.output_height) = self.output.as_usize();
 
         // Default 0.0 clamps fov to 0.001 => ~1000x zoom, garbage output.
         cp.fov_scale = 1.0;
@@ -137,31 +174,28 @@ impl LensOnlyParams {
 
     /// Mirrors FrameTransform::get_fov at fov_scale 1: horizontal half-angle exact, cropped vertically.
     pub fn fov(&self) -> f64 {
-        self.in_w as f64 / (self.out_w.max(1) as f64)
+        self.input.w as f64 / (self.output.w.max(1) as f64)
     }
 
     /// PINHOLE intrinsics of the *undistorted output*, for the manifest and cameras.txt.
-    pub fn output_intrinsics(&self) -> Result<[f64; 4]> {
-        let k = self.lens.get_camera_matrix((self.in_w, self.in_h));
+    pub fn output_intrinsics(&self) -> [f64; 4] {
+        let k = self.lens.get_camera_matrix(self.input.as_usize());
         // The matrix comes back at CALIBRATION resolution; scale it as get_lens_data_at_timestamp does.
         let calib_w = self.lens.calib_dimension.w as f64;
         let calib_h = self.lens.calib_dimension.h as f64;
-        if calib_w <= 0.0 || calib_h <= 0.0 {
-            bail!("profile has no calibration dimensions");
-        }
         let stretch_x = stretch(self.lens.input_horizontal_stretch);
         let stretch_y = stretch(self.lens.input_vertical_stretch);
-        let ratio_x = self.in_w as f64 / calib_w * stretch_x;
-        let ratio_y = self.in_h as f64 / calib_h * stretch_y;
+        let ratio_x = self.input.w as f64 / calib_w * stretch_x;
+        let ratio_y = self.input.h as f64 / calib_h * stretch_y;
         let fov = self.fov();
         // get_new_k: focals divided by fov with horizontal stretch backed out.
         let img_dim_ratio = 1.0 / stretch_x;
-        Ok([
+        [
             k[(0, 0)] * ratio_x * img_dim_ratio / fov,
             k[(1, 1)] * ratio_y * img_dim_ratio / fov,
-            self.out_w as f64 / 2.0,
-            self.out_h as f64 / 2.0,
-        ])
+            self.output.w as f64 / 2.0,
+            self.output.h as f64 / 2.0,
+        ]
     }
 }
 
@@ -175,11 +209,9 @@ pub fn gpu_devices() -> Vec<String> {
 
 /// gyroflow initializes wgpu on the first frame, so the only way to ask is to render one.
 pub fn gpu_usable(params: &LensOnlyParams, interp: Interp, device: usize) -> bool {
-    let mut u = Undistorter::new_gpu(params, interp, device);
-    let mut input = vec![0u8; params.in_w * params.in_h * 3];
-    let mut out = vec![0u8; params.out_w * params.out_h * 3];
+    let mut u = Undistorter::new(params, interp, Some(device));
     // `process_rgb` drops the RGBA staging when it detects the fallback.
-    u.process_rgb(&mut input, &mut out).is_ok() && u.rgba.is_some()
+    u.process_rgb(&mut Rgb8::zeroed(params.input)).is_ok() && u.rgba.is_some()
 }
 
 /// One `Stabilization` reused across a clip, so the transform matrix is computed once. Not Sync.
@@ -189,79 +221,69 @@ pub struct Undistorter {
     rgba: Option<(Vec<u8>, Vec<u8>)>,
     /// Verified against `info.backend` on the first frame, then trusted.
     backend_checked: bool,
-    in_w: usize,
-    in_h: usize,
-    out_w: usize,
-    out_h: usize,
+    input: Size,
+    output: Size,
 }
 
 impl Undistorter {
-    pub fn new(params: &LensOnlyParams, interp: Interp) -> Self {
-        Self::build(params, interp, -1)
-    }
-
-    /// A failed init falls back to gyroflow's CPU kernel, which `process_rgb` detects on the first frame.
-    pub fn new_gpu(params: &LensOnlyParams, interp: Interp, device: usize) -> Self {
-        Self::build(params, interp, device as isize)
-    }
-
-    fn build(params: &LensOnlyParams, interp: Interp, device: isize) -> Self {
+    /// `gpu` is a [`gpu_devices`] index. A failed GPU init falls back to gyroflow's CPU kernel, which `process_rgb` detects on the first frame.
+    pub fn new(params: &LensOnlyParams, interp: Interp, gpu: Option<usize>) -> Self {
+        let device = gpu.map_or(-1, |d| d as isize);
         let mut stab = Stabilization::default();
         stab.set_compute_params(params.compute_params());
-        stab.init_size((params.in_w, params.in_h), (params.out_w, params.out_h));
+        stab.init_size(params.input.as_usize(), params.output.as_usize());
         stab.interpolation = interp.to_gf();
         // set_device(-1) => BackendType::Cpu, a real switch: no adapter or Vulkan loader is created at all.
         stab.set_device(device);
         let rgba = (device >= 0).then(|| {
             (
-                vec![0u8; params.in_w * params.in_h * 4],
-                vec![0u8; params.out_w * params.out_h * 4],
+                vec![0u8; params.input.px() * 4],
+                vec![0u8; params.output.px() * 4],
             )
         });
         Self {
             stab,
             rgba,
             backend_checked: false,
-            in_w: params.in_w,
-            in_h: params.in_h,
-            out_w: params.out_w,
-            out_h: params.out_h,
+            input: params.input,
+            output: params.output,
         }
     }
 
-    /// `input` is `&mut` only because `BufferSource::Cpu` demands it; it is unmodified.
-    pub fn process_rgb(&mut self, input: &mut [u8], out: &mut [u8]) -> Result<()> {
+    /// `frame` is `&mut` only because `BufferSource::Cpu` demands it; it is unmodified.
+    pub fn process_rgb(&mut self, frame: &mut Rgb8) -> Result<Rgb8> {
         anyhow::ensure!(
-            input.len() == self.in_w * self.in_h * 3,
-            "bad input buffer size"
+            frame.size() == self.input,
+            "frame is {}, the undistorter was built for {}",
+            frame.size(),
+            self.input
         );
-        anyhow::ensure!(
-            out.len() == self.out_w * self.out_h * 3,
-            "bad output buffer size"
-        );
-        let backend = if self.rgba.is_some() {
-            let (rgba_in, _) = self.rgba.as_mut().unwrap();
-            for (dst, src) in rgba_in
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(input.as_chunks::<3>().0)
-            {
-                dst[..3].copy_from_slice(src);
+        let mut rendered = Rgb8::zeroed(self.output);
+        let (input, out) = (frame.data_mut(), rendered.data_mut());
+        let backend = match self.rgba.take() {
+            Some((mut rgba_in, mut rgba_out)) => {
+                for (dst, src) in rgba_in
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(input.as_chunks::<3>().0)
+                {
+                    dst[..3].copy_from_slice(src);
+                }
+                let backend = self.render::<RGBA8>(4, &mut rgba_in, &mut rgba_out);
+                for (dst, src) in out
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(rgba_out.as_chunks::<4>().0)
+                {
+                    dst.copy_from_slice(&src[..3]);
+                }
+                // Put back before `?`, so a failed frame does not silently switch the next one to the CPU path.
+                self.rgba = Some((rgba_in, rgba_out));
+                backend?
             }
-            let backend = self.process::<RGBA8>(4)?;
-            let (_, rgba_out) = self.rgba.as_ref().unwrap();
-            for (dst, src) in out
-                .as_chunks_mut::<3>()
-                .0
-                .iter_mut()
-                .zip(rgba_out.as_chunks::<4>().0)
-            {
-                dst.copy_from_slice(&src[..3]);
-            }
-            backend
-        } else {
-            self.process_cpu_rgb(input, out)?
+            None => self.render::<RGB8>(3, input, out)?,
         };
         if !self.backend_checked {
             self.backend_checked = true;
@@ -283,52 +305,30 @@ impl Undistorter {
                 ),
             }
         }
-        Ok(())
+        Ok(rendered)
     }
 
-    fn process_cpu_rgb(&mut self, input: &mut [u8], out: &mut [u8]) -> Result<&'static str> {
-        let mut buffers = Self::buffers(
-            (self.in_w, self.in_h, self.in_w * 3),
-            input,
-            (self.out_w, self.out_h, self.out_w * 3),
-            out,
-        );
-        Self::run::<RGB8>(&mut self.stab, &mut buffers)
-    }
-
-    fn process<T: PixelType>(&mut self, bpp: usize) -> Result<&'static str> {
-        let (rgba_in, rgba_out) = self.rgba.as_mut().unwrap();
-        let mut buffers = Self::buffers(
-            (self.in_w, self.in_h, self.in_w * bpp),
-            rgba_in,
-            (self.out_w, self.out_h, self.out_w * bpp),
-            rgba_out,
-        );
+    fn render<T: PixelType>(
+        &mut self,
+        bpp: usize,
+        input: &mut [u8],
+        out: &mut [u8],
+    ) -> Result<&'static str> {
+        let cpu = |size: Size, buffer| {
+            let (w, h) = size.as_usize();
+            BufferDescription {
+                size: (w, h, w * bpp), // w, h, stride
+                rect: None,
+                rotation: None,
+                data: BufferSource::Cpu { buffer },
+                texture_copy: false,
+            }
+        };
+        let mut buffers = Buffers {
+            input: cpu(self.input, input),
+            output: cpu(self.output, out),
+        };
         Self::run::<T>(&mut self.stab, &mut buffers)
-    }
-
-    fn buffers<'a>(
-        in_size: (usize, usize, usize),
-        input: &'a mut [u8],
-        out_size: (usize, usize, usize),
-        out: &'a mut [u8],
-    ) -> Buffers<'a> {
-        Buffers {
-            input: BufferDescription {
-                size: in_size, // w, h, stride
-                rect: None,
-                rotation: None,
-                data: BufferSource::Cpu { buffer: input },
-                texture_copy: false,
-            },
-            output: BufferDescription {
-                size: out_size,
-                rect: None,
-                rotation: None,
-                data: BufferSource::Cpu { buffer: out },
-                texture_copy: false,
-            },
-        }
     }
 
     fn run<T: PixelType>(stab: &mut Stabilization, buffers: &mut Buffers) -> Result<&'static str> {
@@ -346,45 +346,23 @@ impl Undistorter {
 pub struct ProfileSummary {
     pub name: String,
     pub camera: String,
-    pub calib_w: u32,
-    pub calib_h: u32,
+    pub calib: Size,
     pub fps: f64,
 }
 
 impl ProfileSummary {
-    /// Every check that does not need a frame geometry, so a profile is rejected the same way everywhere.
-    pub fn validate(profile_json: &str) -> Result<Self> {
-        let lens = LensProfile::from_json(profile_json)
-            .map_err(|e| anyhow::anyhow!("lens profile parse failed: {e}"))?;
-        if lens.fisheye_params.distortion_coeffs.is_empty() {
-            bail!("lens profile has no distortion coefficients");
-        }
-        if lens.calib_dimension.w == 0 || lens.calib_dimension.h == 0 {
-            bail!("lens profile has no calibration dimensions");
-        }
-        Ok(Self {
-            name: lens.name.clone(),
-            camera: format!("{} {}", lens.camera_brand, lens.camera_model)
-                .trim()
-                .to_string(),
-            calib_w: lens.calib_dimension.w as u32,
-            calib_h: lens.calib_dimension.h as u32,
-            fps: lens.fps,
-        })
-    }
-
     /// Calibration is per-aspect: the wrong variant silently undistorts to the wrong field of view.
-    pub fn mismatch(&self, clip_w: u32, clip_h: u32, clip_fps: f64) -> Option<String> {
-        if self.calib_w == 0 || self.calib_h == 0 || clip_w == 0 || clip_h == 0 {
+    pub fn mismatch(&self, clip: Size, clip_fps: f64) -> Option<String> {
+        if self.calib.is_empty() || clip.is_empty() {
             return None;
         }
-        let calib_ar = self.calib_w as f64 / self.calib_h as f64;
-        let clip_ar = clip_w as f64 / clip_h as f64;
+        let aspect = |s: Size| s.w as f64 / s.h as f64;
+        let (calib_ar, clip_ar) = (aspect(self.calib), aspect(clip));
         if (calib_ar - clip_ar).abs() > 0.02 {
             return Some(format!(
-                "profile is calibrated for {}×{} ({calib_ar:.2}:1). The clip is {clip_w}×{clip_h} \
+                "profile is calibrated for {}×{} ({calib_ar:.2}:1). The clip is {}×{} \
                  ({clip_ar:.2}:1). A different aspect means a different calibrated crop",
-                self.calib_w, self.calib_h
+                self.calib.w, self.calib.h, clip.w, clip.h
             ));
         }
         if self.fps > 0.0 && clip_fps > 0.0 && (self.fps - clip_fps).abs() > 1.0 {
@@ -399,26 +377,24 @@ impl ProfileSummary {
 }
 
 /// Convenience for tests and previews: undistort a whole RGB image in one call.
-pub fn undistort_rgb_image(params: &LensOnlyParams, interp: Interp, rgb: &[u8]) -> Result<Vec<u8>> {
-    let mut und = Undistorter::new(params, interp);
-    let mut input = rgb.to_vec();
-    let mut out = vec![0u8; params.out_w * params.out_h * 3];
-    und.process_rgb(&mut input, &mut out)
-        .context("undistort failed")?;
-    Ok(out)
+pub fn undistort_rgb_image(params: &LensOnlyParams, interp: Interp, rgb: &Rgb8) -> Result<Rgb8> {
+    Undistorter::new(params, interp, None)
+        .process_rgb(&mut rgb.clone())
+        .context("undistort failed")
 }
 
-/// Serialized as its name, the same spelling `--interpolation` takes, so a
-/// manifest stays readable and the enum stays the single definition of it.
-impl serde::Serialize for Interp {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.name())
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl<'de> serde::Deserialize<'de> for Interp {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let name = <std::borrow::Cow<'_, str>>::deserialize(d)?;
-        name.parse().map_err(serde::de::Error::custom)
+    /// None here means something bypassed LensProfile::from_json, so init() never ran.
+    #[test]
+    fn a_parsed_profile_has_run_init() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/dji_o4_pro_stock_white_4k60.json"
+        );
+        let lens = LensProfileFile::load(Path::new(path)).unwrap();
+        assert!(lens.lens.fisheye_params.radial_distortion_limit.is_some());
     }
 }

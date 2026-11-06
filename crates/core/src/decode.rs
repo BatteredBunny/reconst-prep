@@ -8,6 +8,8 @@ use crossbeam_channel::{Receiver, bounded};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_sidecar::event::FfmpegEvent;
 
+use crate::frame::{Rgb8, Size};
+
 /// A failed hwaccel init must not kill the run: an explicit backend that fails is retried without it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HwAccel {
@@ -65,13 +67,22 @@ fn exe_name(stem: &str) -> String {
     }
 }
 
+/// Typed so a frontend can say how to point at ffmpeg its own way.
+#[derive(Debug, thiserror::Error)]
+#[error("could not run {}. Install ffmpeg and put it on PATH", .path.display())]
+pub struct FfmpegNotFound {
+    pub path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
 impl Ffmpeg {
     /// In order: an explicit path, a copy beside our own executable, then PATH. Never downloads.
     pub fn resolve(explicit: Option<&Path>) -> Result<Self> {
         let ffmpeg: PathBuf = match explicit {
             Some(p) => {
                 if !p.exists() {
-                    bail!("--ffmpeg-path {} does not exist", p.display());
+                    bail!("ffmpeg path {} does not exist", p.display());
                 }
                 p.to_path_buf()
             }
@@ -86,11 +97,9 @@ impl Ffmpeg {
         let out = Command::new(&ffmpeg)
             .arg("-version")
             .output()
-            .with_context(|| {
-                format!(
-                    "could not run {}. Install ffmpeg and put it on PATH, or pass --ffmpeg-path",
-                    ffmpeg.display()
-                )
+            .map_err(|source| FfmpegNotFound {
+                path: ffmpeg.clone(),
+                source,
             })?;
         if !out.status.success() {
             bail!("{} -version exited with {}", ffmpeg.display(), out.status);
@@ -128,13 +137,12 @@ impl Ffmpeg {
 }
 
 /// Per-clip metadata from ffprobe (with fallbacks when fields are missing).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ClipInfo {
     pub path: PathBuf,
     /// Prefix for output image names; de-duplicated by the pipeline.
     pub stem: String,
-    pub width: u32,
-    pub height: u32,
+    pub size: Size,
     pub fps: f64,
     /// Best-effort total (nb_frames, else duration*fps), for progress only.
     pub frames: Option<u64>,
@@ -217,8 +225,7 @@ pub fn probe_clip(ff: &Ffmpeg, path: &Path) -> Result<ClipInfo> {
     Ok(ClipInfo {
         path: path.to_path_buf(),
         stem,
-        width,
-        height,
+        size: Size::new(width, height),
         fps,
         frames,
         codec,
@@ -244,12 +251,9 @@ fn check_frame_rate(path: &Path, fps: f64) -> Result<()> {
     Ok(())
 }
 
-/// One decoded video frame, tightly packed RGB8.
 pub struct RawFrame {
     pub index: u64,
-    pub width: u32,
-    pub height: u32,
-    pub rgb: Vec<u8>,
+    pub rgb: Rgb8,
 }
 
 /// Runs ffmpeg on a background thread over a bounded channel, kept shallow because 4K frames are ~33 MB.
@@ -273,17 +277,17 @@ impl Decoder {
             .spawn(move || {
                 // A hwaccel that fails to init, or delivers no frames, warns once and re-decodes in software.
                 let retry_in_software = |reason: String| {
-                    eprintln!("warning: hwaccel '{hw}' {reason}; retrying with software decode");
+                    log::warn!("hwaccel '{hw}' {reason}; retrying with software decode");
                     if let Err(e) = run_ffmpeg(&ffmpeg, &path, None, &tx, &c).result {
                         let _ = tx.send(Err(e));
                     }
                 };
-                let cancelled = || c.is_cancelled();
-
                 let run = run_ffmpeg(&ffmpeg, &path, hw.as_arg(), &tx, &c);
+                // Only a run that delivered nothing can be retried: the frames already sent would arrive twice.
+                let retryable = hw.as_arg().is_some() && run.frames == 0 && !c.is_cancelled();
                 match run.result {
-                    Ok(()) if run.frames == 0 && !cancelled() => {
-                        if hw.as_arg().is_some() {
+                    Ok(()) if run.frames == 0 && !c.is_cancelled() => {
+                        if retryable {
                             retry_in_software(format!("produced no frames for {}", path.display()));
                         } else {
                             let _ = tx.send(Err(anyhow::anyhow!(
@@ -294,8 +298,7 @@ impl Decoder {
                     }
                     Ok(()) => {}
                     Err(e) => {
-                        // Only a run that delivered nothing can be retried: the frames already sent would arrive twice.
-                        if hw.as_arg().is_some() && run.frames == 0 && !cancelled() {
+                        if retryable {
                             retry_in_software(format!(
                                 "decode failed for {} ({e:#})",
                                 path.display()
@@ -344,10 +347,7 @@ pub fn decode_frame_at_scaled(
     scale_w: Option<u32>,
 ) -> Result<RawFrame> {
     let spawn = |hw: Option<&str>| -> Result<Option<RawFrame>> {
-        let mut cmd = FfmpegCommand::new_with_path(&ff.ffmpeg);
-        if let Some(hw) = hw {
-            cmd.hwaccel(hw);
-        }
+        let mut cmd = ffmpeg_command(&ff.ffmpeg, hw);
         if scale_w.is_some() {
             // A thumbnail can snap to the seek's keyframe; the full-size preview cannot, its arrows step one frame.
             cmd.arg("-noaccurate_seek");
@@ -369,12 +369,7 @@ pub fn decode_frame_at_scaled(
             if let FfmpegEvent::OutputFrame(f) = event
                 && frame.is_none()
             {
-                frame = Some(RawFrame {
-                    index: 0,
-                    width: f.width,
-                    height: f.height,
-                    rgb: f.data,
-                });
+                frame = Some(RawFrame::from_output(0, f)?);
             }
         }
         let _ = child.wait();
@@ -386,6 +381,23 @@ pub fn decode_frame_at_scaled(
         first => first,
     };
     frame.with_context(|| format!("no frame decoded from {}", path.display()))
+}
+
+fn ffmpeg_command(ffmpeg: &Path, hwaccel: Option<&str>) -> FfmpegCommand {
+    let mut cmd = FfmpegCommand::new_with_path(ffmpeg);
+    if let Some(hw) = hwaccel {
+        cmd.hwaccel(hw);
+    }
+    cmd
+}
+
+impl RawFrame {
+    fn from_output(index: u64, f: ffmpeg_sidecar::event::OutputVideoFrame) -> Result<Self> {
+        Ok(Self {
+            index,
+            rgb: Rgb8::new(Size::new(f.width, f.height), f.data)?,
+        })
+    }
 }
 
 /// The frame count matters even when the run failed: a partial decode cannot be retried, the caller holds those frames.
@@ -404,10 +416,7 @@ fn run_ffmpeg(
 ) -> FfmpegRun {
     let mut frames: u64 = 0;
     let result = (|| -> Result<()> {
-        let mut cmd = FfmpegCommand::new_with_path(ffmpeg);
-        if let Some(hw) = hwaccel {
-            cmd.hwaccel(hw);
-        }
+        let mut cmd = ffmpeg_command(ffmpeg, hwaccel);
         // `-i` by hand rather than `input()`, which takes a `&str` and would
         // force a lossy conversion: a non-UTF-8 name probes fine then fails here.
         cmd.arg("-i").arg(input);
@@ -425,13 +434,8 @@ fn run_ffmpeg(
             }
             match event {
                 FfmpegEvent::OutputFrame(f) => {
+                    let frame = RawFrame::from_output(frames, f)?;
                     frames += 1;
-                    let frame = RawFrame {
-                        index: frames - 1,
-                        width: f.width,
-                        height: f.height,
-                        rgb: f.data,
-                    };
                     if tx.send(Ok(frame)).is_err() {
                         // Pipeline stopped; reap ffmpeg.
                         let _ = child.kill();

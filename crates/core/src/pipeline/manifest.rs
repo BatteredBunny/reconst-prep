@@ -41,8 +41,8 @@ pub struct ManifestClip {
     pub frames_probed: Option<u64>,
     pub frames_decoded: u64,
     pub frames_kept: u64,
-    pub out_width: usize,
-    pub out_height: usize,
+    pub out_width: u32,
+    pub out_height: u32,
     /// `None` without lens correction: the images still carry distortion, so there is no honest pinhole model.
     pub pinhole_intrinsics: Option<[f64; 4]>,
     /// Replayed by `--frames-from`, and how `--resume` checks a clip's images are on disk.
@@ -56,7 +56,6 @@ pub fn image_name(stem: &str, index: u64, format: ImageFormat) -> String {
 }
 
 impl ManifestClip {
-    /// The file name a kept frame was written under.
     pub fn image_name(&self, index: u64, format: ImageFormat) -> String {
         image_name(&self.stem, index, format)
     }
@@ -82,7 +81,6 @@ pub struct RunManifest {
     /// A killed run leaves this false with only the finished clips listed, which is what `--resume` needs.
     #[serde(default = "default_true")]
     pub completed: bool,
-    /// `None` when undistortion was off.
     pub profile: Option<ManifestProfile>,
     pub params: ManifestParams,
     pub clips: Vec<ManifestClip>,
@@ -93,11 +91,9 @@ fn default_true() -> bool {
     true
 }
 
-/// File name of the manifest inside an output directory.
 const MANIFEST_NAME: &str = "reconst-prep-manifest.json";
 
 impl RunManifest {
-    /// A manifest for a run about to start: no clips, zero totals, `completed: false`.
     pub fn new(
         ffmpeg_version: String,
         profile: Option<ManifestProfile>,
@@ -108,10 +104,7 @@ impl RunManifest {
             tool_version: crate::TOOL_VERSION.to_string(),
             gyroflow_core_rev: crate::GYROFLOW_CORE_REV.to_string(),
             ffmpeg_version,
-            created_unix: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            created_unix: crate::paths::unix_now(),
             completed: false,
             profile,
             params,
@@ -158,11 +151,14 @@ impl RunManifest {
 
     /// The entry only appears once a clip finished, but files can be deleted or partially copied away afterwards.
     pub fn clip_is_intact(&self, clip: &ManifestClip, dir: &Path) -> bool {
+        let mask_dirs = self.params.masking.iter().flat_map(|m| m.sidecars.values());
         clip.kept_frames.len() as u64 == clip.frames_kept
-            && clip
-                .kept_frames
-                .iter()
-                .all(|&i| dir.join(clip.image_name(i, self.params.format)).is_file())
+            && clip.kept_frames.iter().all(|&i| {
+                let name = clip.image_name(i, self.params.format);
+                dir.join(&name).is_file()
+                    && (mask_dirs.clone())
+                        .all(|d| dir.join(d).join(format!("{name}.png")).is_file())
+            })
     }
 }
 
@@ -259,40 +255,57 @@ mod tests {
         }
     }
 
+    /// Every compare that changes which frames come out refuses and names itself; hwaccel only changes speed.
     #[test]
-    fn identical_parameters_do_not_block_a_resume() {
+    fn parameter_changes_are_refused_by_name() {
         let m = manifest(OutputSpec::Same);
-        let params = manifest(OutputSpec::Same).params;
-        assert_eq!(parameter_mismatch(&m, &params, None), None);
-    }
+        let base = || m.params.clone();
+        let mismatch = |p: ManifestParams, profile| parameter_mismatch(&m, &p, profile);
+        assert_eq!(mismatch(base(), None), None);
+        let hwaccel = HwAccel::None;
+        assert_eq!(mismatch(ManifestParams { hwaccel, ..base() }, None), None);
 
-    #[test]
-    fn a_changed_output_size_is_refused_and_named() {
-        // At --size 0.25 vs 0.5, 3 of 41 kept frames differ, so a resume across a size change mixes two selections.
-        let m = manifest(OutputSpec::Same);
-        let params = manifest(OutputSpec::Scale { factor: 0.5 }).params;
-        let diff = parameter_mismatch(&m, &params, None).expect("must refuse");
-        assert!(diff.contains("output size"), "unhelpful: {diff}");
-    }
-
-    #[test]
-    fn a_changed_selection_is_refused() {
-        let m = manifest(OutputSpec::Same);
-        let mut params = manifest(OutputSpec::Same).params;
-        params.selection = SelectionConfig {
+        let profile = ManifestProfile {
+            path: "/tmp/lens.json".into(),
+            name: "DJI O4".into(),
+            sha256: "abc123".into(),
+        };
+        let every_5th = SelectionConfig {
             mode: SelectionMode::EveryNth { n: 5 },
             blur_floor: None,
         };
-        let diff = parameter_mismatch(&m, &params, None).expect("must refuse");
-        assert!(diff.contains("frame selection"), "unhelpful: {diff}");
-    }
-
-    #[test]
-    fn hwaccel_alone_does_not_block_a_resume() {
-        let m = manifest(OutputSpec::Same);
-        let mut params = manifest(OutputSpec::Same).params;
-        params.hwaccel = HwAccel::None;
-        assert_eq!(parameter_mismatch(&m, &params, None), None);
+        let half = OutputSpec::Scale { factor: 0.5 };
+        // At --size 0.25 vs 0.5, 3 of 41 kept frames differ, so even a size change mixes two selections.
+        for (params, profile, named) in [
+            (
+                ManifestParams {
+                    output_size: half,
+                    ..base()
+                },
+                None,
+                "output size",
+            ),
+            (
+                ManifestParams {
+                    selection: every_5th,
+                    ..base()
+                },
+                None,
+                "frame selection",
+            ),
+            (
+                ManifestParams {
+                    gpu: true,
+                    ..base()
+                },
+                None,
+                "gpu",
+            ),
+            (base(), Some(&profile), "profile"),
+        ] {
+            let diff = mismatch(params, profile).expect(named);
+            assert!(diff.contains(named), "unhelpful: {diff}");
+        }
     }
 
     #[test]
@@ -352,46 +365,28 @@ mod tests {
         assert!(m.clips[0].kept_frames.is_empty());
     }
 
-    /// The GPU and lens-profile refusals are the two `parameter_mismatch`
-    /// compares that no test covered, and both change which frames come out.
-    #[test]
-    fn a_changed_backend_or_profile_is_refused() {
-        let m = manifest(OutputSpec::Same);
-        let mut params = manifest(OutputSpec::Same).params;
-        params.gpu = true;
-        let diff = parameter_mismatch(&m, &params, None).expect("must refuse a backend change");
-        assert!(diff.contains("gpu"), "unhelpful: {diff}");
-
-        let profile = ManifestProfile {
-            path: "/tmp/lens.json".into(),
-            name: "DJI O4".into(),
-            sha256: "abc123".into(),
-        };
-        let params = manifest(OutputSpec::Same).params;
-        let diff = parameter_mismatch(&m, &params, Some(&profile))
-            .expect("must refuse a profile appearing");
-        assert!(diff.contains("profile"), "unhelpful: {diff}");
+    fn clip(kept_frames: Vec<u64>) -> ManifestClip {
+        ManifestClip {
+            path: "/tmp/clip.mp4".into(),
+            stem: "clip".into(),
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            frames_probed: None,
+            frames_decoded: 100,
+            frames_kept: kept_frames.len() as u64,
+            out_width: 1920,
+            out_height: 1080,
+            pinhole_intrinsics: None,
+            kept_frames,
+        }
     }
 
     #[test]
     fn a_clip_is_not_intact_when_an_image_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let m = manifest(OutputSpec::Same);
-        let clip = ManifestClip {
-            path: "/tmp/clip.mp4".into(),
-            stem: "clip".into(),
-            width: 3840,
-            height: 2160,
-            fps: 60.0,
-            frames_probed: Some(100),
-            frames_decoded: 100,
-            frames_kept: 2,
-            out_width: 3840,
-            out_height: 2160,
-            pinhole_intrinsics: None,
-            kept_frames: vec![0, 15],
-        };
-
+        let clip = clip(vec![0, 15]);
         assert!(!m.clip_is_intact(&clip, dir.path()), "nothing written yet");
 
         std::fs::write(dir.path().join(clip.image_name(0, m.params.format)), b"x").unwrap();
@@ -401,27 +396,35 @@ mod tests {
         assert!(m.clip_is_intact(&clip, dir.path()));
     }
 
+    #[test]
+    fn a_clip_is_not_intact_when_a_mask_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = manifest(OutputSpec::Same);
+        let sky = crate::mask::MaskConfig {
+            sky: Some(crate::mask::SkyParams::default()),
+            seg: None,
+        };
+        m.params.masking = Some(sky.describe());
+        let clip = clip(vec![0]);
+        let name = clip.image_name(0, m.params.format);
+        std::fs::write(dir.path().join(&name), b"x").unwrap();
+        assert!(!m.clip_is_intact(&clip, dir.path()), "its mask is missing");
+
+        let masks = dir.path().join(crate::mask::SFM_MASK_DIR);
+        std::fs::create_dir(&masks).unwrap();
+        std::fs::write(masks.join(format!("{name}.png")), b"x").unwrap();
+        assert!(m.clip_is_intact(&clip, dir.path()));
+    }
+
     /// `frames_kept` and the recorded list disagreeing means the record itself
     /// is inconsistent, so the clip must be redone rather than trusted.
     #[test]
     fn a_clip_whose_count_disagrees_with_its_list_is_not_intact() {
         let dir = tempfile::tempdir().unwrap();
         let m = manifest(OutputSpec::Same);
-        let mut clip = ManifestClip {
-            path: "/tmp/clip.mp4".into(),
-            stem: "clip".into(),
-            width: 1920,
-            height: 1080,
-            fps: 30.0,
-            frames_probed: None,
-            frames_decoded: 10,
-            frames_kept: 3,
-            out_width: 1920,
-            out_height: 1080,
-            pinhole_intrinsics: None,
-            kept_frames: vec![0],
-        };
+        let mut clip = clip(vec![0]);
         std::fs::write(dir.path().join(clip.image_name(0, m.params.format)), b"x").unwrap();
+        clip.frames_kept = 3;
         assert!(!m.clip_is_intact(&clip, dir.path()));
 
         clip.frames_kept = 1;

@@ -3,13 +3,31 @@
 use std::path::{Path, PathBuf};
 
 use reconst_prep_core::decode::HwAccel;
-use reconst_prep_core::mask::{MaskConfig, MaskSources, SkyParams};
+use reconst_prep_core::mask::{MaskConfig, MaskSourceError, MaskSources, SkyParams};
+use reconst_prep_core::output::ImageFormat;
 use reconst_prep_core::pipeline::OutputSpec;
 use reconst_prep_core::seg::SegClassParams;
 use reconst_prep_core::select::{SelectionConfig, SelectionMode};
 use reconst_prep_core::undistort::Interp;
 
-use crate::{ModeChoice, SizeChoice};
+/// What the GUI offers before anything is changed; double-click on a slider restores it.
+pub const DEFAULT_SCALE_FACTOR: f64 = 0.5;
+pub const DEFAULT_BLUR_FLOOR: f64 = 100.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SizeChoice {
+    Same,
+    Scale,
+    Exact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ModeChoice {
+    Motion,
+    EveryNth,
+}
 
 /// A setting with a short list of named options, for the combo boxes. The name is also what serde writes, so menu and file cannot drift.
 pub(crate) trait Choice: Sized + Clone + PartialEq {
@@ -36,7 +54,7 @@ impl Choice for HwAccel {
 
 impl Choice for Interp {
     fn all() -> Vec<Self> {
-        vec![Interp::Bilinear, Interp::Bicubic, Interp::Lanczos4]
+        Interp::ALL.to_vec()
     }
     fn label(&self) -> String {
         self.name().to_string()
@@ -86,7 +104,7 @@ impl Default for Settings {
             profile: None,
             // Native, matching `--size same`: a dataset the two frontends disagree about is one `--resume` refuses.
             size_choice: SizeChoice::Same,
-            scale_factor: 0.5,
+            scale_factor: DEFAULT_SCALE_FACTOR,
             exact_w: 1920,
             exact_h: 1080,
             format_jpeg: true,
@@ -96,7 +114,7 @@ impl Default for Settings {
             motion_threshold: reconst_prep_core::select::DEFAULT_MOTION_THRESHOLD,
             window: reconst_prep_core::select::DEFAULT_WINDOW,
             blur_floor_on: false,
-            blur_floor: 100.0,
+            blur_floor: DEFAULT_BLUR_FLOOR,
             mask_sky: false,
             sky: SkyParams::default(),
             mask_people: false,
@@ -128,8 +146,11 @@ impl InterruptedRun {
     /// Only if an unfinished manifest still backs it: a record pointing at a completed or deleted directory is stale.
     pub fn load() -> Option<Self> {
         let path = state_path()?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let run: Self = serde_json::from_str(&text).ok()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        // It embeds the whole `Settings`, so a settings change that breaks the format drops the offer; say so.
+        let run: Self = serde_json::from_str(&text)
+            .inspect_err(|e| log::warn!("ignoring unreadable {}: {e}", path.display()))
+            .ok()?;
         let manifest =
             reconst_prep_core::pipeline::RunManifest::read_from_dir(&run.out_dir).ok()??;
         (!manifest.completed).then_some(run)
@@ -209,13 +230,17 @@ impl Settings {
     }
 }
 
-/// Failures are swallowed: neither file is worth refusing to run, or to close, over.
+/// Failures are logged, not raised: neither file is worth refusing to run, or to close, over.
+/// Atomic, because a half-written settings file is moved aside on the next load and costs every setting.
 fn write_json(path: &Path, value: &impl serde::Serialize) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(json) = serde_json::to_string_pretty(value) {
-        let _ = std::fs::write(path, json);
+    let written = serde_json::to_string_pretty(value)
+        .map_err(anyhow::Error::from)
+        .and_then(|json| reconst_prep_core::paths::write_atomic(path, json.as_bytes()));
+    if let Err(e) = written {
+        log::warn!("could not save {}: {e:#}", path.display());
     }
 }
 
@@ -249,8 +274,23 @@ impl Settings {
         }
     }
 
+    pub fn image_format(&self) -> ImageFormat {
+        if self.format_jpeg {
+            ImageFormat::Jpeg {
+                quality: self.jpeg_quality,
+            }
+        } else {
+            ImageFormat::Png
+        }
+    }
+
+    /// Lens correction is on with nothing to correct with.
+    pub fn lens_unready(&self) -> bool {
+        self.undistort && self.profile.is_none()
+    }
+
     /// The GUI always asks for the stock ADE20K classes, unlike the CLI's per-class flags.
-    pub fn mask_config(&self) -> MaskConfig {
+    pub fn mask_config(&self) -> Result<MaskConfig, MaskSourceError> {
         MaskConfig::from_sources(MaskSources {
             mask_sky: self.mask_sky,
             sky_heuristic: self.sky,
@@ -269,9 +309,7 @@ impl Settings {
 
     pub fn masked_classes(&self) -> Vec<&'static str> {
         self.mask_config()
-            .classes_with_source()
-            .into_iter()
-            .map(|(class, _)| class.name())
-            .collect()
+            .map(|m| m.sources().map(|(class, _)| class.name()).collect())
+            .unwrap_or_default()
     }
 }

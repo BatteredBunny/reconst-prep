@@ -1,13 +1,15 @@
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::Result;
 
 use reconst_prep_core::cancel::CancelToken;
-use reconst_prep_core::decode::{ClipInfo, Ffmpeg, HwAccel, decode_frame_at_scaled, probe_clip};
+use reconst_prep_core::decode::{ClipInfo, Ffmpeg, HwAccel, decode_frame_at_scaled};
+use reconst_prep_core::frame::{Rgb8, Size};
 use reconst_prep_core::gray::resize_rgb;
-use reconst_prep_core::mask::{Mask, MaskClass, MaskConfig};
-use reconst_prep_core::pipeline::{OutputSpec, analyze_frame, mask_and_sharpness, render_output};
-use reconst_prep_core::undistort::{Interp, LensOnlyParams, Undistorter};
+use reconst_prep_core::mask::{Mask, MaskClass, MaskConfig, PreparedMask};
+use reconst_prep_core::pipeline::{OutputSpec, analyze_frame, render_output};
+use reconst_prep_core::undistort::{Interp, LensProfileFile, Undistorter};
 
 /// Mask edges and sharpness are judged at 1:1, so there has to be something to zoom into.
 const MAX_DISPLAY_W: u32 = 1920;
@@ -16,12 +18,20 @@ const MAX_DISPLAY_W: u32 = 1920;
 pub const THUMB_W: u32 = 192;
 pub const THUMB_H: u32 = 108;
 
-/// An image ready to become a texture.
+/// An image ready to become a texture: RGB8, or RGBA8 for the mask overlay.
 #[derive(Clone)]
 pub struct DisplayImage {
-    pub rgb: Vec<u8>,
-    pub w: u32,
-    pub h: u32,
+    pub size: Size,
+    pub data: Vec<u8>,
+}
+
+impl From<Rgb8> for DisplayImage {
+    fn from(rgb: Rgb8) -> Self {
+        Self {
+            size: rgb.size(),
+            data: rgb.into_data(),
+        }
+    }
 }
 
 pub struct PreviewData {
@@ -38,10 +48,40 @@ pub struct PreviewData {
     pub sharpness: Option<f64>,
 }
 
+/// Resolved once, on first use and off the UI thread: resolving launches ffmpeg and ffprobe.
+#[derive(Clone, Default)]
+pub struct SharedFfmpeg(Arc<OnceLock<Result<Ffmpeg, String>>>);
+
+impl SharedFfmpeg {
+    pub fn get(&self) -> Result<&Ffmpeg> {
+        self.0
+            .get_or_init(|| Ffmpeg::resolve(None).map_err(|e| format!("{e:#}")))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// The mask last prepared for a preview, so a slider tweak does not reload the model.
+#[derive(Clone, Default)]
+pub struct MaskCache(Arc<Mutex<Option<PreparedMask>>>);
+
+impl MaskCache {
+    fn get(&self, cfg: &MaskConfig, frame: Size) -> Result<PreparedMask> {
+        let mut slot = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mask = match &*slot {
+            Some(prev) => prev.reconfigure(cfg, frame)?,
+            None => cfg.prepare(frame)?,
+        };
+        *slot = Some(mask.clone());
+        Ok(mask)
+    }
+}
+
 /// Equality decides whether a settings change needs a new frame, so nothing that leaves the frame unchanged belongs in here.
 #[derive(Clone, PartialEq)]
 pub struct PreviewRequest {
-    pub path: std::path::PathBuf,
+    /// As probed, so the preview need not probe again.
+    pub clip: ClipInfo,
     pub profile: Option<std::path::PathBuf>,
     /// Position in the clip, 0..1.
     pub pos: f64,
@@ -66,52 +106,48 @@ pub fn duration_of(info: &ClipInfo) -> Option<f64> {
 }
 
 /// Cover and crop, never stretch: fitting-and-padding would put the two sides of the wipe at different scales.
-fn fit_into(rgb: &[u8], w: u32, h: u32, box_w: u32, box_h: u32) -> Result<DisplayImage> {
-    let scale = (box_w as f64 / w as f64).max(box_h as f64 / h as f64);
-    let (sw, sh) = (
-        ((w as f64 * scale).round() as u32).max(box_w),
-        ((h as f64 * scale).round() as u32).max(box_h),
-    );
-    let scaled = resize_rgb(rgb, w, h, sw, sh)?;
-    if (sw, sh) == (box_w, box_h) {
-        return Ok(DisplayImage {
-            rgb: scaled,
-            w: box_w,
-            h: box_h,
-        });
+fn fit_into(rgb: &Rgb8, frame: Size) -> Result<DisplayImage> {
+    let size = rgb.size();
+    let scale = (frame.w as f64 / size.w as f64).max(frame.h as f64 / size.h as f64);
+    let fill = |v: u32, min: u32| ((v as f64 * scale).round() as u32).max(min);
+    let scaled_size = Size::new(fill(size.w, frame.w), fill(size.h, frame.h));
+    let scaled = resize_rgb(rgb, scaled_size)?;
+    if scaled_size == frame {
+        return Ok(scaled.into());
     }
-    let mut out = vec![0u8; (box_w as usize) * (box_h as usize) * 3];
-    let (ox, oy) = ((sw - box_w) / 2, (sh - box_h) / 2);
-    for y in 0..box_h {
-        let dst = (y as usize) * box_w as usize * 3;
-        let src = (((y + oy) as usize) * sw as usize + ox as usize) * 3;
-        out[dst..dst + box_w as usize * 3].copy_from_slice(&scaled[src..src + box_w as usize * 3]);
+    let (row, scaled_row) = (frame.w as usize * 3, scaled_size.w as usize * 3);
+    let (ox, oy) = (
+        (scaled_size.w - frame.w) as usize / 2,
+        (scaled_size.h - frame.h) as usize / 2,
+    );
+    let mut out = vec![0u8; frame.px() * 3];
+    for (y, dst) in out.chunks_exact_mut(row).enumerate() {
+        let src = (y + oy) * scaled_row + ox * 3;
+        dst.copy_from_slice(&scaled.data()[src..src + row]);
     }
     Ok(DisplayImage {
-        rgb: out,
-        w: box_w,
-        h: box_h,
+        size: frame,
+        data: out,
     })
 }
 
 /// Display size for the output frame: capped, and even.
-fn display_size(w: u32, h: u32) -> (u32, u32) {
-    if w <= MAX_DISPLAY_W {
-        return (w, h);
+fn display_size(size: Size) -> Size {
+    if size.w <= MAX_DISPLAY_W {
+        return size;
     }
-    let dw = MAX_DISPLAY_W;
-    let dh = ((h as u64 * dw as u64 / w as u64).max(1) as u32) & !1;
-    (dw, dh)
+    let capped = size.at_width(MAX_DISPLAY_W);
+    Size::new(capped.w, capped.h & !1)
 }
 
 /// Each class tints its own pixels its own colour, later classes over earlier ones.
-fn build_overlay(layers: &[(MaskClass, Mask)], w: u32, h: u32) -> Option<DisplayImage> {
+fn build_overlay(layers: &[(MaskClass, Mask)], size: Size) -> Option<DisplayImage> {
     if layers.is_empty() {
         return None;
     }
-    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    let mut rgba = vec![0u8; size.px() * 4];
     for (class, mask) in layers {
-        let scaled = mask.scaled_to(w, h);
+        let scaled = mask.scaled_to(size);
         let c = class_color(*class);
         for (px, &valid) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(&scaled.data) {
             if valid == 0 {
@@ -123,7 +159,7 @@ fn build_overlay(layers: &[(MaskClass, Mask)], w: u32, h: u32) -> Option<Display
             }
         }
     }
-    Some(DisplayImage { rgb: rgba, w, h })
+    Some(DisplayImage { size, data: rgba })
 }
 
 /// Every update repaints the pane, so the preview assembles on screen instead of appearing complete after the slowest step.
@@ -144,29 +180,30 @@ pub enum PreviewUpdate {
 
 pub fn build_preview(
     req: &PreviewRequest,
+    ff: &SharedFfmpeg,
+    masks: &MaskCache,
     cancel: &CancelToken,
     emit: &mut dyn FnMut(PreviewUpdate),
 ) -> Result<()> {
     let t0 = Instant::now();
-    let ff = Ffmpeg::resolve(None)?;
-    let info = probe_clip(&ff, &req.path)?;
-    let duration_s = duration_of(&info).unwrap_or(10.0);
+    let ff = ff.get()?;
+    let info = &req.clip;
+    let duration_s = duration_of(info).unwrap_or(10.0);
     let start_s = req.pos.clamp(0.0, 0.98) * duration_s;
-    let (in_w, in_h) = (info.width, info.height);
-    let (out_w, out_h) = req.output_spec.resolve(in_w, in_h)?;
+    let out_size = req.output_spec.resolve(info.size)?;
 
-    let mut frame = decode_frame_at_scaled(&ff, &req.path, &req.hwaccel, start_s, None)?;
+    let frame = decode_frame_at_scaled(ff, &info.path, &req.hwaccel, start_s, None)?;
     anyhow::ensure!(
-        (frame.width, frame.height) == (in_w, in_h),
-        "frame size {}x{} does not match probed {in_w}x{in_h}",
-        frame.width,
-        frame.height,
+        frame.rgb.size() == info.size,
+        "frame size {} does not match probed {}",
+        frame.rgb.size(),
+        info.size,
     );
     let t_decode = t0.elapsed().as_secs_f64();
 
     // The raw frame goes up before any work starts, on both sides of the wipe.
-    let (dw, dh) = display_size(out_w as u32, out_h as u32);
-    let source = fit_into(&frame.rgb, in_w, in_h, dw, dh)?;
+    let display = display_size(out_size);
+    let source = fit_into(&frame.rgb, display)?;
     emit(PreviewUpdate::Raw(Box::new(PreviewData {
         clip_stem: info.stem.clone(),
         start_s,
@@ -181,60 +218,37 @@ pub fn build_preview(
     // With no profile this is the plain resize, or at native size the decoded buffer itself.
     let params = req
         .profile
-        .as_ref()
-        .map(|p| -> Result<_> {
-            let json = std::fs::read_to_string(p)?;
-            LensOnlyParams::new(&json, in_w as usize, in_h as usize, out_w, out_h)
-        })
+        .as_deref()
+        .map(|p| LensProfileFile::load(p)?.params(info.size, out_size))
         .transpose()?;
     if params.is_some() {
         emit(PreviewUpdate::Stage("undistorting"));
     }
-    let mut undistorter = params.as_ref().map(|p| Undistorter::new(p, req.interp));
-    let out = render_output(
-        &mut frame.rgb,
-        (in_w, in_h),
-        (out_w, out_h),
-        undistorter.as_mut(),
-    )?;
+    let mut undistorter = params
+        .as_ref()
+        .map(|p| Undistorter::new(p, req.interp, None));
+    let out = render_output(frame.rgb, out_size, undistorter.as_mut())?;
     anyhow::ensure!(!superseded(), "preview superseded");
-    emit(PreviewUpdate::Rendered(
-        if (dw, dh) == (out_w as u32, out_h as u32) {
-            DisplayImage {
-                rgb: out.clone(),
-                w: dw,
-                h: dh,
-            }
-        } else {
-            DisplayImage {
-                rgb: resize_rgb(&out, out_w as u32, out_h as u32, dw, dh)?,
-                w: dw,
-                h: dh,
-            }
-        },
-    ));
+    emit(PreviewUpdate::Rendered(if display == out_size {
+        out.clone().into()
+    } else {
+        resize_rgb(&out, display)?.into()
+    }));
     let t_render = t0.elapsed().as_secs_f64();
 
     if req.mask.is_active() {
         emit(PreviewUpdate::Stage("masking"));
     }
-    // Loading the model here makes the preview where a bad --seg-model is found, not the start of a long run.
-    let mask_cfg = req.mask.prepare(out_w as u32, out_h as u32)?;
-    // The same metric thumbnail the run uses, so the readouts here are the run's numbers.
-    let a = analyze_frame(&out, out_w as u32, out_h as u32, &mask_cfg)?;
+    // Loading the model here makes the preview where a bad model is found, not the start of a long run.
+    let mask = masks.get(&req.mask, out_size)?;
+    // The same metric thumbnail and judgement the run uses, so the readouts here are the run's numbers.
+    let mut a = analyze_frame(&out, &mask)?;
     anyhow::ensure!(!superseded(), "preview superseded");
-    let mut gray = a.gray;
-    // Per class, so the overlay can tint each source its own colour. Before masking narrows `gray` to the SfM set.
-    let layers = if mask_cfg.is_active() {
-        mask_cfg.class_layers(&a.small, &gray, a.seg.as_ref())
-    } else {
-        Vec::new()
-    };
-    let (mask, sharpness) = mask_and_sharpness(&mask_cfg, &a.small, &mut gray, a.seg.as_ref());
+    let judged = mask.judge(&a.small, &mut a.gray, a.seg.as_ref());
     emit(PreviewUpdate::Finished {
-        overlay: build_overlay(&layers, dw, dh),
-        masked_fraction: mask.map_or(0.0, |m| 1.0 - m.sfm.valid_fraction()),
-        sharpness,
+        overlay: build_overlay(&judged.layers, display),
+        masked_fraction: judged.mask.map_or(0.0, |m| 1.0 - m.sfm.valid_fraction()),
+        sharpness: judged.sharpness,
     });
     log::info!(
         "preview ready in {:.1}s (decode {t_decode:.1}s, render {:.1}s, mask {:.1}s)",
@@ -246,17 +260,20 @@ pub fn build_preview(
 }
 
 /// Taken a tenth of the way in, not at frame zero, where drone footage is still on the ground or in a black lead-in.
-pub fn build_thumbnail(path: &std::path::Path, duration_s: f64) -> Result<DisplayImage> {
+pub fn build_thumbnail(
+    path: &std::path::Path,
+    duration_s: f64,
+    ff: &SharedFfmpeg,
+) -> Result<DisplayImage> {
     // Software decode deliberately: one 4K HEVC frame is 1.09 s on the CPU against 1.20 s through VAAPI, whose setup dwarfs it.
     let hwaccel = HwAccel::None;
-    let ff = Ffmpeg::resolve(None)?;
     // A little more than we draw: `fit_into` still crops 4:3 to 16:9.
     let f = decode_frame_at_scaled(
-        &ff,
+        ff.get()?,
         path,
         &hwaccel,
         duration_s * 0.1,
         Some(THUMB_W.max(THUMB_H * 16 / 9)),
     )?;
-    fit_into(&f.rgb, f.width, f.height, THUMB_W, THUMB_H)
+    fit_into(&f.rgb, Size::new(THUMB_W, THUMB_H))
 }

@@ -2,69 +2,90 @@
 
 use eframe::egui;
 
-/// Returns the body's value, or `None` while the category is collapsed.
-pub fn category<R>(
-    ui: &mut egui::Ui,
-    id_source: &str,
-    icon: &str,
-    title: &str,
-    enable: Option<&mut bool>,
+/// A collapsible section of the config column: open by default, with no checkbox unless [`Category::toggle`] adds one.
+pub struct Category<'a> {
+    id_source: &'a str,
+    icon: &'a str,
+    title: &'a str,
+    enable: Option<&'a mut bool>,
     default_open: bool,
-    add_body: impl FnOnce(&mut egui::Ui) -> R,
-) -> Option<R> {
-    let id = ui.make_persistent_id(id_source);
-    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
-        ui.ctx(),
-        id,
-        default_open,
-    );
+}
 
-    let mut title_clicked = false;
-    let mut header = state.show_header(ui, |ui| {
-        if let Some(flag) = enable {
-            let response = ui.checkbox(flag, "");
-            // An unlabelled checkbox announces itself as nothing at all, so it borrows the category's name.
-            let (on, enabled) = (*flag, response.enabled());
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::Role::CheckBox,
-                    enabled,
-                    on,
-                    format!("Enable {title}"),
-                )
-            });
+impl<'a> Category<'a> {
+    pub fn new(id_source: &'a str, icon: &'a str, title: &'a str) -> Self {
+        Self {
+            id_source,
+            icon,
+            title,
+            enable: None,
+            default_open: true,
         }
-        // The title toggles the category too: egui's collapsing header reacts only to the 14 px arrow.
-        title_clicked = ui
-            .add(
-                egui::Label::new(
-                    egui::RichText::new(format!("{icon}  {}", title.to_uppercase()))
-                        .strong()
-                        .size(13.0),
-                )
-                .sense(egui::Sense::click()),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked();
-    });
-    // Ticking a category does *not* open it: opening has its own gesture, the arrow or the title.
-    if title_clicked {
-        header.toggle();
     }
 
-    let is_open = header.is_open();
-    let (toggle, _, body) = header.body(add_body);
-    let toggle = clickable(toggle);
-    toggle.widget_info(|| {
-        egui::WidgetInfo::selected(
+    pub fn collapsed(mut self) -> Self {
+        self.default_open = false;
+        self
+    }
+
+    /// A checkbox in the header that switches the whole feature on.
+    pub fn toggle(mut self, on: &'a mut bool) -> Self {
+        self.enable = Some(on);
+        self
+    }
+
+    pub fn show(self, ui: &mut egui::Ui, add_body: impl FnOnce(&mut egui::Ui)) {
+        let title = self.title;
+        let id = ui.make_persistent_id(self.id_source);
+        let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            id,
+            self.default_open,
+        );
+
+        let mut title_clicked = false;
+        let mut header = state.show_header(ui, |ui| {
+            if let Some(flag) = self.enable {
+                let response = ui.checkbox(flag, "");
+                // An unlabelled checkbox announces itself as nothing at all, so it borrows the category's name.
+                announce(
+                    &response,
+                    egui::Role::CheckBox,
+                    *flag,
+                    format!("Enable {title}"),
+                );
+            }
+            // The title toggles the category too: egui's collapsing header reacts only to the 14 px arrow.
+            let text = format!("{}  {}", self.icon, title.to_uppercase());
+            title_clicked = ui
+                .add(
+                    egui::Label::new(egui::RichText::new(text).strong().size(13.0))
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked();
+        });
+        // Ticking a category does *not* open it: opening has its own gesture, the arrow or the title.
+        if title_clicked {
+            header.toggle();
+        }
+
+        let is_open = header.is_open();
+        let (toggle, _, _) = header.body(add_body);
+        let toggle = clickable(toggle);
+        announce(
+            &toggle,
             egui::Role::DisclosureTriangle,
-            true,
             is_open,
             format!("{title} section"),
-        )
-    });
-    ui.add_space(3.0);
-    body.map(|r| r.inner)
+        );
+        ui.add_space(3.0);
+    }
+}
+
+/// Names a stateful control for screen readers.
+fn announce(response: &egui::Response, role: egui::Role, on: bool, name: String) {
+    let enabled = response.enabled();
+    response.widget_info(|| egui::WidgetInfo::selected(role, enabled, on, name.clone()));
 }
 
 /// Slider that restores its default on double-click.
@@ -76,11 +97,34 @@ pub fn slider<T: egui::emath::Numeric>(
     default: T,
     help: &str,
 ) -> egui::Response {
-    let response = ui.add(egui::Slider::new(value, range).text(text));
+    slider_with(ui, value, range, text, default, help, |s| s)
+}
+
+/// [`slider`], for one that also needs egui's own options, such as a logarithmic scale.
+pub fn slider_with<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut T,
+    range: std::ops::RangeInclusive<T>,
+    text: &str,
+    default: T,
+    help: &str,
+    tweak: impl for<'s> FnOnce(egui::Slider<'s>) -> egui::Slider<'s>,
+) -> egui::Response {
+    let response = ui.add(tweak(egui::Slider::new(value, range).text(text)));
     if response.double_clicked() {
         *value = default;
     }
     response.on_hover_text(help)
+}
+
+/// Small, quiet text for counts and details under a control.
+pub fn caption(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).weak().size(11.0)
+}
+
+/// The bare warning symbol, for a row whose words are elsewhere; hover text says why.
+pub fn warn_icon(ui: &mut egui::Ui) -> egui::Response {
+    ui.colored_label(ui.visuals().warn_fg_color, crate::icons::PROBLEM)
 }
 
 /// A short inline warning: yellow, one line, next to what it is about.
@@ -101,14 +145,14 @@ pub fn error(ui: &mut egui::Ui, text: impl Into<String>) {
 
 /// Always present and never opened by switching its feature on, so nothing appears or disappears under the pointer.
 /// `owner` is what the header controls, so the toggle announces which "advanced options" it opens.
-pub fn subsection_beside<R>(
+pub fn subsection_beside(
     ui: &mut egui::Ui,
     id_source: &str,
     owner: &str,
-    title: &str,
     header: impl FnOnce(&mut egui::Ui),
-    add_body: impl FnOnce(&mut egui::Ui) -> R,
-) -> Option<R> {
+    add_body: impl FnOnce(&mut egui::Ui),
+) {
+    const TITLE: &str = "advanced options";
     let id = ui.make_persistent_id(id_source);
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
@@ -118,27 +162,20 @@ pub fn subsection_beside<R>(
         let is_open = state.is_open();
         clickable(state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon));
         let label = ui
-            .add(
-                egui::Label::new(egui::RichText::new(title).weak().size(11.0))
-                    .sense(egui::Sense::click()),
-            )
+            .add(egui::Label::new(caption(TITLE)).sense(egui::Sense::click()))
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         // The words rather than the arrow carry the name: they are the bigger target, and toggle too.
-        label.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::Role::DisclosureTriangle,
-                true,
-                is_open,
-                format!("{owner} {title}"),
-            )
-        });
+        announce(
+            &label,
+            egui::Role::DisclosureTriangle,
+            is_open,
+            format!("{owner} {TITLE}"),
+        );
         if label.clicked() {
             state.toggle(ui);
         }
     });
-    state
-        .show_body_indented(&row.response, ui, add_body)
-        .map(|r| r.inner)
+    state.show_body_indented(&row.response, ui, add_body);
 }
 
 /// egui honours `Visuals::interact_cursor` for `Button` alone, so everything else has to ask.

@@ -4,8 +4,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use reconst_prep_core::decode::HwAccel;
 use reconst_prep_core::mask::SkyParams;
+use reconst_prep_core::pipeline::OutputSpec;
 use reconst_prep_core::seg::SegClassParams;
+use reconst_prep_core::undistort::Interp;
 
 const ABOUT: &str = "Reconstruction-ready image datasets from video in one pass:\n\
 frames, optionally lens-corrected, resized, thinned to the ones worth\n\
@@ -119,11 +122,11 @@ pub struct PrepArgs {
     /// A different aspect than the input crops the field of view exactly like
     /// a Gyroflow app export at that size.
     #[arg(long, default_value = "same")]
-    pub size: String,
+    pub size: OutputSpec,
 
-    /// Output image format: "png" or "jpeg".
-    #[arg(long, default_value = "jpeg")]
-    pub format: String,
+    /// Output image format.
+    #[arg(long, value_enum, ignore_case = true, default_value_t = FormatArg::Jpeg)]
+    pub format: FormatArg,
 
     /// JPEG quality (1-100).
     #[arg(
@@ -133,9 +136,9 @@ pub struct PrepArgs {
     )]
     pub jpeg_quality: u8,
 
-    /// Selection mode: "motion" (default) or "every-nth".
-    #[arg(long, default_value = "motion")]
-    pub select: String,
+    /// Selection mode.
+    #[arg(long, value_enum, ignore_case = true, default_value_t = SelectArg::Motion)]
+    pub select: SelectArg,
 
     /// every-nth: keep every Nth frame.
     #[arg(long, default_value_t = reconst_prep_core::select::DEFAULT_NTH)]
@@ -158,7 +161,7 @@ pub struct PrepArgs {
     /// Hardware decoding: auto | none | vulkan | nvdec | cuda | vaapi | qsv.
     /// If the chosen backend produces nothing, software decoding takes over.
     #[arg(long, default_value = "auto")]
-    pub hwaccel: String,
+    pub hwaccel: HwAccel,
 
     /// Explicit ffmpeg binary. The default resolves from PATH, never downloads.
     #[arg(long)]
@@ -170,7 +173,7 @@ pub struct PrepArgs {
     /// rendering at or near native size, where its extra sharpness is visible;
     /// it runs at roughly half the speed.
     #[arg(long, default_value = "bilinear")]
-    pub interpolation: String,
+    pub interpolation: Interp,
 
     /// Undistort on the GPU. On by default; falls back to the CPU
     /// automatically when no usable device is found.
@@ -276,4 +279,19 @@ pub struct PrepArgs {
     /// Suppress per-frame progress output.
     #[arg(short, long)]
     pub quiet: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatArg {
+    Png,
+    #[value(alias = "jpg")]
+    Jpeg,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectArg {
+    #[value(alias = "motion-gated")]
+    Motion,
+    #[value(alias = "nth")]
+    EveryNth,
 }

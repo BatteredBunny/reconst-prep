@@ -5,27 +5,22 @@ use eframe::egui;
 use reconst_prep_core::profiles;
 
 use crate::icons::{self, icon_button};
-use crate::widgets::{self, category, check, combo, mono, short_name, warn};
+use crate::widgets::{self, Category, check, combo, mono, short_name, warn};
 use crate::{App, Msg};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     let mut on = app.cfg.undistort;
-    category(
-        ui,
-        "cat_lens",
-        icons::LENS,
-        "Lens correction",
-        Some(&mut on),
-        false,
-        |ui| {
+    Category::new("cat_lens", icons::LENS, "Lens correction")
+        .toggle(&mut on)
+        .collapsed()
+        .show(ui, |ui| {
             ui.weak("Removes the fisheye distortion using a Gyroflow lens profile.");
             ui.add_space(4.0);
             picker(app, ui, ctx);
             validation(app, ui);
             ui.add_space(6.0);
             how(app, ui);
-        },
-    );
+        });
     app.cfg.undistort = on;
 }
 
@@ -97,8 +92,8 @@ fn validation(app: &mut App, ui: &mut egui::Ui) {
             } else {
                 summary.camera.clone()
             },
-            summary.calib_w,
-            summary.calib_h,
+            summary.calib.w,
+            summary.calib.h,
             summary.fps
         ))
         .weak()
@@ -106,7 +101,7 @@ fn validation(app: &mut App, ui: &mut egui::Ui) {
     );
     // Compare against the clip that is actually being previewed.
     if let Some(info) = app.preview_clip_info()
-        && let Some(problem) = summary.mismatch(info.width, info.height, info.fps)
+        && let Some(problem) = summary.mismatch(info.size, info.fps)
     {
         warn(ui, problem);
     }
@@ -203,10 +198,7 @@ fn browser(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
         app.browser.focus_query |= submit;
         return;
     }
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .map(|t| t.to_ascii_lowercase())
-        .collect();
+    let terms = profiles::terms(&query);
     let hits = profiles::search(&app.browser.entries, &query);
     ui.add_space(4.0);
     ui.label(
@@ -263,7 +255,7 @@ fn recents(app: &mut App, ui: &mut egui::Ui) -> usize {
     if app.browser.recent.is_empty() {
         return 0;
     }
-    ui.label(egui::RichText::new("Recent").weak().size(11.0));
+    ui.label(widgets::caption("Recent"));
     // The pick is carried out of the loop rather than the list cloned into it.
     let mut picked = None;
     let mut shown = 0;
@@ -323,13 +315,13 @@ fn push_terms(
 ) {
     let hay = text.to_ascii_lowercase();
     let mut hit = vec![false; text.len()];
-    for term in terms {
+    for term in terms.iter().filter(|t| !t.is_empty()) {
         let mut from = 0;
-        // Every occurrence, not the first.
+        // Every occurrence, not the first. Stepping past the whole match keeps `from` on a char boundary.
         while let Some(at) = hay[from..].find(term.as_str()) {
             let start = from + at;
             hit[start..start + term.len()].fill(true);
-            from = start + 1;
+            from = start + term.len();
         }
     }
 
@@ -357,5 +349,28 @@ fn push_terms(
 /// A search query built from what we already know about the clip.
 fn suggestion_query(app: &App) -> Option<String> {
     let info = app.preview_clip_info()?;
-    Some(format!("{}x{}", info.width, info.height))
+    Some(info.size.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn highlighted(text: &str, terms: &[&str]) -> Vec<String> {
+        let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+        let mut job = egui::text::LayoutJob::default();
+        let font = egui::FontId::default();
+        push_terms(&mut job, text, &terms, egui::Color32::WHITE, &font);
+        job.sections
+            .iter()
+            .filter(|s| s.format.color == crate::theme::AMBER)
+            .map(|s| job.text[s.byte_range.start.0..s.byte_range.end.0].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_multibyte_term_is_highlighted_without_panicking() {
+        assert_eq!(highlighted("Zöom 4×3 ö", &["ö"]), ["ö", "ö"]);
+        assert_eq!(highlighted("4096×3072", &["×"]), ["×"]);
+    }
 }

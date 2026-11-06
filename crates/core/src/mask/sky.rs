@@ -1,6 +1,7 @@
 // The sky heuristic: a flood fill from the top edge, and nothing about what
 // the resulting mask is then used for.
 
+use crate::frame::Rgb8;
 use crate::gray::GrayFrame;
 
 use super::Mask;
@@ -29,12 +30,13 @@ impl Default for SkyParams {
 }
 
 /// Connectivity to the top edge is what spares bright roofs and water; a missing horizon fails visibly.
-pub fn sky_mask(rgb: &[u8], gray: &GrayFrame, p: SkyParams) -> Mask {
-    let (w, h) = (gray.w as usize, gray.h as usize);
-    let mut mask = Mask::all_valid(gray.w, gray.h);
-    if w == 0 || h == 0 || rgb.len() < w * h * 3 {
+pub fn sky_mask(rgb: &Rgb8, gray: &GrayFrame, p: SkyParams) -> Mask {
+    let mut mask = Mask::all_valid(gray.size);
+    if gray.size.is_empty() || rgb.size() != gray.size {
         return mask;
     }
+    let (w, h) = gray.size.as_usize();
+    let rgb = rgb.data();
 
     let candidate = |i: usize| -> bool {
         let px = &rgb[i * 3..i * 3 + 3];
@@ -85,25 +87,12 @@ mod tests {
     use super::*;
     use crate::gray::rgb_to_gray;
 
-    fn sky_mask_from_rgb(rgb: &[u8], w: u32, h: u32, p: SkyParams) -> Mask {
-        let gray = rgb_to_gray(rgb, w, h);
+    fn sky_mask_from_rgb(rgb: &Rgb8, p: SkyParams) -> Mask {
+        let gray = rgb_to_gray(rgb);
         sky_mask(rgb, &gray, p)
     }
 
-    /// Bright blue top half, dark ground bottom half.
-    fn synthetic(w: u32, h: u32) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-        for y in 0..h {
-            for _ in 0..w {
-                if y < h / 2 {
-                    rgb.extend_from_slice(&[150, 180, 230]);
-                } else {
-                    rgb.extend_from_slice(&[60, 70, 40]);
-                }
-            }
-        }
-        rgb
-    }
+    use super::super::synthetic;
 
     #[test]
     fn sky_mask_takes_the_top_and_stops_at_the_horizon() {
@@ -111,8 +100,6 @@ mod tests {
         let rgb = synthetic(w, h);
         let m = sky_mask_from_rgb(
             &rgb,
-            w,
-            h,
             SkyParams {
                 dilate: 0,
                 ..Default::default()
@@ -133,13 +120,11 @@ mod tests {
         for y in 24..28 {
             for x in 8..16 {
                 let i = ((y * w + x) * 3) as usize;
-                rgb[i..i + 3].copy_from_slice(&[150, 180, 230]);
+                rgb.data_mut()[i..i + 3].copy_from_slice(&[150, 180, 230]);
             }
         }
         let m = sky_mask_from_rgb(
             &rgb,
-            w,
-            h,
             SkyParams {
                 dilate: 0,
                 ..Default::default()
@@ -154,8 +139,6 @@ mod tests {
         let rgb = synthetic(w, h);
         let tight = sky_mask_from_rgb(
             &rgb,
-            w,
-            h,
             SkyParams {
                 dilate: 0,
                 ..Default::default()
@@ -163,8 +146,6 @@ mod tests {
         );
         let grown = sky_mask_from_rgb(
             &rgb,
-            w,
-            h,
             SkyParams {
                 dilate: 2,
                 ..Default::default()

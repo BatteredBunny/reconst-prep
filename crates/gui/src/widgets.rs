@@ -13,14 +13,11 @@ pub fn category<R>(
     add_body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
     let id = ui.make_persistent_id(id_source);
-    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
         default_open,
     );
-    if let Some(open) = crate::demo::forced_open(ui.ctx(), id_source) {
-        state.set_open(open);
-    }
 
     let mut title_clicked = false;
     let mut header = state.show_header(ui, |ui| {
@@ -103,9 +100,11 @@ pub fn error(ui: &mut egui::Ui, text: impl Into<String>) {
 }
 
 /// Always present and never opened by switching its feature on, so nothing appears or disappears under the pointer.
+/// `owner` is what the header controls, so the toggle announces which "advanced options" it opens.
 pub fn subsection_beside<R>(
     ui: &mut egui::Ui,
     id_source: &str,
+    owner: &str,
     title: &str,
     header: impl FnOnce(&mut egui::Ui),
     add_body: impl FnOnce(&mut egui::Ui) -> R,
@@ -113,12 +112,10 @@ pub fn subsection_beside<R>(
     let id = ui.make_persistent_id(id_source);
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-    if let Some(open) = crate::demo::forced_open(ui.ctx(), id_source) {
-        state.set_open(open);
-    }
     let row = ui.horizontal(|ui| {
         header(ui);
         ui.add_space(6.0);
+        let is_open = state.is_open();
         clickable(state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon));
         let label = ui
             .add(
@@ -126,6 +123,15 @@ pub fn subsection_beside<R>(
                     .sense(egui::Sense::click()),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+        // The words rather than the arrow carry the name: they are the bigger target, and toggle too.
+        label.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::Role::DisclosureTriangle,
+                true,
+                is_open,
+                format!("{owner} {title}"),
+            )
+        });
         if label.clicked() {
             state.toggle(ui);
         }

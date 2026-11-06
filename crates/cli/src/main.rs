@@ -11,6 +11,14 @@ use clap::{CommandFactory, Parser};
 use crate::cli::{Cli, Command};
 
 fn main() {
+    // The Windows installer runs `--veloapp-install <version>` and its siblings after installing and
+    // before uninstalling, and reports any exit but 0 as a partly failed install. Nothing to do on either.
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| a.starts_with("--veloapp-"))
+    {
+        return;
+    }
     install_logger();
     let cli = Cli::parse();
 

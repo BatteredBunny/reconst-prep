@@ -1,0 +1,60 @@
+<!-- The README's hero image. Units are the app's points: each shot in clean/ is the 1280x720 point
+     window at twice that in pixels. A shot is cropped by the viewBox of the <svg> around it, and
+     placed and tilted by the <g> around that. Rendered by nix/screenshots.nix. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="1780" height="900" viewBox="130 40 1780 900">
+  <defs>
+    <style>
+      .frame { fill: none; stroke: #2a2d32; stroke-width: 2; }
+      .name {
+        font-family: Lexend; font-weight: 700; font-size: 80px;
+        fill: #ffffff; stroke: #000000; stroke-width: 12px; stroke-linejoin: round;
+        paint-order: stroke;
+      }
+    </style>
+  </defs>
+
+  <!-- The lens column. -->
+  <g transform="translate(150 150) rotate(-5 194 192)">
+    <svg width="388" height="385" viewBox="0 0 388 385">
+      <image href="clean/lens.png" width="1280" height="720"/>
+    </svg>
+    <rect class="frame" width="388" height="385"/>
+  </g>
+
+  <!-- The masking column. -->
+  <g transform="translate(170 600) rotate(4 194 137)">
+    <svg width="388" height="275" viewBox="0 95 388 275">
+      <image href="clean/masking.png" width="1280" height="720"/>
+    </svg>
+    <rect class="frame" width="388" height="275"/>
+  </g>
+
+  <!-- The whole window, scaled to 80%. -->
+  <g transform="translate(560 220) rotate(-1 512 288) scale(0.8)">
+    <image href="clean/main.png" width="1280" height="720"/>
+    <rect class="frame" width="1280" height="720"/>
+  </g>
+
+  <!-- Selection, filters and output. -->
+  <g transform="translate(1500 190) rotate(5 194 205)">
+    <svg width="388" height="410" viewBox="0 125 388 410">
+      <image href="clean/selection.png" width="1280" height="720"/>
+    </svg>
+    <rect class="frame" width="388" height="410"/>
+  </g>
+
+  <!-- The run's status line, scaled to 82%. -->
+  <g transform="translate(560 790) rotate(-2 525 21) scale(0.82)">
+    <svg width="1280" height="52" viewBox="0 668 1280 52">
+      <image href="clean/processing.png" width="1280" height="720"/>
+    </svg>
+    <rect class="frame" width="1280" height="52"/>
+  </g>
+
+  <!-- The name, centred over the window. -->
+  <g transform="translate(1070 110)">
+    <image href="icon.svg" x="-362" y="-60" width="120" height="120"/>
+    <text class="name" x="-218" y="28">reconst-prep</text>
+  </g>
+</svg>

@@ -26,23 +26,23 @@ The preview on the right shows the frame before and after your settings, drag th
 
 Lens correction undistorts fisheye footage with a Gyroflow lens profile, either from a file or searched from Gyroflow's database:
 
-<img src="assets/screenshots/lens.png" width="780" alt="Lens correction panel">
+<img src="assets/screenshots/lens.png" width="626" alt="Lens correction panel">
 
 ## Feature detection
 
 Sky and people masking, with tunable sky detection. People masking needs a segmentation model, which can be downloaded from its advanced options:
 
-<img src="assets/screenshots/masking.png" width="820" alt="Masking panel">
+<img src="assets/screenshots/masking.png" width="909" alt="Masking panel">
 
 ## Frame selection algorithms
 
 Frame selection keeps a frame once the camera has moved enough (or every Nth frame), filters drop blurry frames, and output sets the size and image format:
 
-<img src="assets/screenshots/selection.png" width="810" alt="Frame selection, filters and output panels">
+<img src="assets/screenshots/selection.png" width="721" alt="Frame selection, filters and output panels">
 
 Processing shows progress per clip and how many frames were kept:
 
-<img src="assets/screenshots/processing.png" width="1280" alt="A run in progress">
+<img src="assets/screenshots/processing.png" width="745" alt="A run in progress">
 
 # CLI
 

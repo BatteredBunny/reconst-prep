@@ -1,7 +1,7 @@
 {
   lib,
   stdenv,
-  rustPlatform,
+  craneLib,
   pkg-config,
   makeWrapper,
   installShellFiles,
@@ -37,39 +37,69 @@ let
     "${gtk3}/share/gsettings-schemas/${gtk3.name}"
     "${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}"
   ];
-in
-rustPlatform.buildRustPackage {
-  pname = "reconst-prep";
-  version = "0.1.0";
 
-  src = ../.;
-
-  cargoDeps = rustPlatform.importCargoLock {
-    lockFile = ../Cargo.lock;
-    allowBuiltinFetchGit = true;
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../Cargo.toml
+      ../Cargo.lock
+      ../crates
+      ../assets/icon.svg
+      ../assets/icon-256.png
+      ../packaging/appimage/reconst-prep.desktop
+    ];
   };
 
-  __structuredAttrs = true;
-  strictDeps = true;
+  # gyroflow-core's build script downloads its lens-profile database, which the sandbox forbids.
+  cargoVendorDir = craneLib.vendorCargoDeps {
+    inherit src;
+    overrideVendorGitCheckout =
+      crates: drv:
+      if lib.any (crate: crate.name == "gyroflow-core") crates then
+        drv.overrideAttrs (old: {
+          postInstall = (old.postInstall or "") + ''
+            for crate in "$out"/gyroflow-core-*; do
+              echo 'fn main() {}' > "$crate/build.rs"
+            done
+          '';
+        })
+      else
+        drv;
+  };
 
-  nativeBuildInputs = [
-    pkg-config
-    makeWrapper
-    installShellFiles
-  ];
+  common = {
+    inherit src cargoVendorDir;
+    pname = "reconst-prep";
+    version = "0.1.0";
+    strictDeps = true;
+    nativeBuildInputs = [ pkg-config ];
+    buildInputs = guiLibs ++ [ gtk3 ];
+  };
 
-  buildInputs = guiLibs ++ [ gtk3 ];
+  # Depends only on Cargo.lock, so the package and clippy share it and CI's Nix store cache keeps it between commits.
+  cargoArtifacts = craneLib.buildDepsOnly common;
+  craneArgs = common // {
+    inherit cargoArtifacts;
+  };
 
-  postPatch = ''
-    for crate in "$cargoDepsCopy"/gyroflow-core-*; do
-      echo 'fn main() {}' > "$crate/build.rs"
-    done
-  '';
+  clippy = craneLib.cargoClippy (
+    craneArgs
+    // {
+      cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
+    }
+  );
+in
+craneLib.buildPackage (
+  craneArgs
+  // {
+    nativeBuildInputs = common.nativeBuildInputs ++ [
+      makeWrapper
+      installShellFiles
+    ];
 
-  doCheck = true;
+    cargoTestExtraArgs = "--workspace";
 
-  postInstall =
-    ''
+    postInstall = ''
       rm -rf $out/lib
 
       install -Dm644 packaging/appimage/reconst-prep.desktop \
@@ -86,23 +116,26 @@ rustPlatform.buildRustPackage {
         --zsh  <($out/bin/reconst-prep completions zsh)
     '';
 
-  postFixup = ''
-    wrapProgram $out/bin/reconst-prep \
-      --prefix PATH : ${lib.makeBinPath [ ffmpeg ]} \
-      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath guiLibs} \
-      --prefix XDG_DATA_DIRS : ${schemaDirs}
-  '';
+    postFixup = ''
+      wrapProgram $out/bin/reconst-prep \
+        --prefix PATH : ${lib.makeBinPath [ ffmpeg ]} \
+        --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath guiLibs} \
+        --prefix XDG_DATA_DIRS : ${schemaDirs}
+    '';
 
-  nativeInstallCheckInputs = [ versionCheckHook ];
-  versionCheckProgramArg = "--version";
-  doInstallCheck = true;
+    nativeInstallCheckInputs = [ versionCheckHook ];
+    versionCheckProgramArg = "--version";
+    doInstallCheck = true;
 
-  meta = {
-    description = "Easy to use tool for preparing video footage for 3D reconstruction as an image dataset.";
-    homepage = "https://github.com/BatteredBunny/reconst-prep";
-    license = lib.licenses.gpl3Plus;
-    mainProgram = "reconst-prep";
-    maintainers = with lib.maintainers; [ BatteredBunny ];
-    platforms = lib.platforms.linux;
-  };
-}
+    passthru = { inherit clippy craneArgs; };
+
+    meta = {
+      description = "Easy to use tool for preparing video footage for 3D reconstruction as an image dataset.";
+      homepage = "https://github.com/BatteredBunny/reconst-prep";
+      license = lib.licenses.gpl3Plus;
+      mainProgram = "reconst-prep";
+      maintainers = with lib.maintainers; [ BatteredBunny ];
+      platforms = lib.platforms.linux;
+    };
+  }
+)

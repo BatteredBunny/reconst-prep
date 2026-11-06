@@ -120,6 +120,11 @@ fn image_view(app: &mut App, ui: &mut egui::Ui) {
     }
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(w, w * aspect), egui::Sense::click_and_drag());
+    let wipe = app.view.wipe;
+    response.widget_info(|| egui::WidgetInfo {
+        value: Some(f64::from(wipe)),
+        ..egui::WidgetInfo::labeled(egui::Role::Splitter, true, "Before and after")
+    });
 
     let split = |t: f32| rect.left() + t.clamp(0.0, 1.0) * rect.width();
     let handle_centre = egui::pos2(split(app.view.wipe), rect.center().y);
@@ -375,10 +380,13 @@ fn step_controls(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect) {
             (crate::icons::FRAME_BACK, -1.0, "One frame back"),
             (crate::icons::FRAME_FORWARD, 1.0, "One frame forward"),
         ] {
-            if ui
-                .add_enabled(step.is_some(), egui::Button::new(label).min_size(SQUARE))
-                .on_hover_text(hover)
-                .clicked()
+            let response =
+                ui.add_enabled(step.is_some(), egui::Button::new(label).min_size(SQUARE));
+            // Named after the hover text: the label is an icon, which would announce as a codepoint.
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, step.is_some(), hover)
+            });
+            if response.on_hover_text(hover).clicked()
                 && let Some(s) = step
             {
                 app.preview_pos = (app.preview_pos + dir * s).clamp(0.0, 1.0);
@@ -396,6 +404,8 @@ fn scrubber(app: &mut App, ui: &mut egui::Ui) {
         egui::Sense::click_and_drag(),
     );
     let response = crate::widgets::clickable(response);
+    let (enabled, pos) = (response.enabled(), app.preview_pos);
+    response.widget_info(|| egui::WidgetInfo::slider(enabled, pos, "Position in the clip"));
     let painter = ui.painter_at(rect);
     let track = egui::Rect::from_min_max(
         rect.left_top(),

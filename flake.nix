@@ -2,6 +2,8 @@
   inputs = {
     nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.zst";
 
+    crane.url = "github:ipetkov/crane";
+
     git-hooks = {
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -12,6 +14,7 @@
     {
       self,
       nixpkgs,
+      crane,
       git-hooks,
       ...
     }:
@@ -30,7 +33,7 @@
     in
     {
       overlays.default = final: _prev: {
-        reconst-prep = final.callPackage ./nix/package.nix { };
+        reconst-prep = final.callPackage ./nix/package.nix { craneLib = crane.mkLib final; };
       };
 
       packages = forAllSystems (
@@ -42,44 +45,29 @@
         {
           inherit (scope) reconst-prep;
           default = scope.reconst-prep;
-          screenshots = pkgs.callPackage ./nix/screenshots.nix { inherit (scope) reconst-prep; };
-        }
-      );
-
-      checks = forAllSystems (
-        system:
-        let
-          pkgs = pkgsFor.${system};
-        in
-        {
-          package = self.packages.${system}.reconst-prep;
-
-          clippy = self.packages.${system}.reconst-prep.overrideAttrs (old: {
-            pname = "${old.pname}-clippy";
-            nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
-            buildPhase = ''
-              runHook preBuild
-              cargo clippy --offline --release --workspace --all-targets -- -D warnings
-              runHook postBuild
-            '';
-            installPhase = "touch $out";
-            dontFixup = true;
-            doCheck = false;
-            doInstallCheck = false;
-          });
-
-          pre-commit = git-hooks.lib.${system}.run {
-            src = ./.;
-            hooks = {
-              rustfmt.enable = true;
-              clippy = {
-                enable = true;
-                stages = [ "pre-push" ];
-              };
-            };
+          screenshots = pkgs.callPackage ./nix/screenshots.nix {
+            inherit (scope) reconst-prep;
+            craneLib = crane.mkLib pkgs;
           };
         }
       );
+
+      checks = forAllSystems (system: {
+        package = self.packages.${system}.reconst-prep;
+
+        inherit (self.packages.${system}.reconst-prep.passthru) clippy;
+
+        pre-commit = git-hooks.lib.${system}.run {
+          src = ./.;
+          hooks = {
+            rustfmt.enable = true;
+            clippy = {
+              enable = true;
+              stages = [ "pre-push" ];
+            };
+          };
+        };
+      });
 
       devShells = forAllSystems (
         system:

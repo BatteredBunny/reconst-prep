@@ -22,3 +22,7 @@ crossbeam-channel.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# Demo screenshot rendering
+egui_kittest = { version = "0.37.0", features = ["eframe", "wgpu"] }

@@ -33,6 +33,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             subsection_beside(
                 ui,
                 "sky_params",
+                "Sky",
                 "advanced options",
                 |ui| {
                     dot(ui, MaskClass::Sky);
@@ -60,6 +61,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             subsection_beside(
                 ui,
                 "seg_params",
+                "People",
                 "advanced options",
                 |ui| {
                     dot(ui, MaskClass::People);

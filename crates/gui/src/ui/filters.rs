@@ -20,6 +20,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             subsection_beside(
                 ui,
                 "blur_params",
+                "Blur filter",
                 "advanced options",
                 |ui| {
                     check(ui, on, "Filter out blurry frames")

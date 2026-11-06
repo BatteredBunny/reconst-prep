@@ -39,8 +39,8 @@ nix-build:
 nix-check:
     nix flake check
 
-screenshots *ARGS:
-    nix run .#screenshots -- {{ ARGS }}
+screenshots:
+    install -m644 "$(nix build --no-link --print-out-paths .#screenshots)"/*.png assets/screenshots/
 
 appimage:
     ./packaging/appimage/build.sh

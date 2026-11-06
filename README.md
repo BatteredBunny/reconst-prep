@@ -115,9 +115,6 @@ chmod +x reconst-prep-*-x86_64.AppImage
 
 Download `ReconstPrep-win-Setup.exe` from the [releases page](https://github.com/BatteredBunny/reconst-prep/releases) and run it. ffmpeg is included.
 
-## Development
+# Building from source
 
-The recommended way is to use the nix dev shell which will provide you with all the dependencies.
-It can be enabled by running `nix develop` (or `direnv allow` to apply it automatically).
-
-Have a look at the steps in the justfile.
+See [docs/local_build.md](docs/local_build.md) for Ubuntu, Windows and NixOS setup.

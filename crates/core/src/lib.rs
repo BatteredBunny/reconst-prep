@@ -14,7 +14,7 @@ pub mod select;
 pub mod undistort;
 
 /// Must match the `rev` in the workspace Cargo.toml; the golden-frame test is the tripwire for bumping it.
-pub const GYROFLOW_CORE_REV: &str = "b5e8828f82c150676e48a7c2e3db39c97392f606";
+pub const GYROFLOW_CORE_REV: &str = "f6cd36bfd1a0cd0152c8b87cd5eead2a232824e1";
 
 pub const TOOL_NAME: &str = "reconst-prep";
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

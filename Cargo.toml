@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/BatteredBunny/reconst-prep"
 
 [workspace.dependencies]
-gyroflow-core = { git = "https://github.com/gyroflow/gyroflow.git", rev = "b5e8828f82c150676e48a7c2e3db39c97392f606", default-features = false }
+gyroflow-core = { git = "https://github.com/BatteredBunny/gyroflow.git", rev = "f6cd36bfd1a0cd0152c8b87cd5eead2a232824e1", default-features = false }
 
 ffmpeg-sidecar = { version = "2.7.0", default-features = false }
 fast_image_resize = "6.1.0"

@@ -50,28 +50,12 @@ let
     ];
   };
 
-  # gyroflow-core's build script downloads its lens-profile database, which the sandbox forbids.
-  cargoVendorDir = craneLib.vendorCargoDeps {
-    inherit src;
-    overrideVendorGitCheckout =
-      crates: drv:
-      if lib.any (crate: crate.name == "gyroflow-core") crates then
-        drv.overrideAttrs (old: {
-          postInstall = (old.postInstall or "") + ''
-            for crate in "$out"/gyroflow-core-*; do
-              echo 'fn main() {}' > "$crate/build.rs"
-            done
-          '';
-        })
-      else
-        drv;
-  };
-
   common = {
-    inherit src cargoVendorDir;
+    inherit src;
     pname = "reconst-prep";
     version = "0.1.0";
     strictDeps = true;
+    GYROFLOW_SKIP_LENS_PROFILE_DOWNLOAD = "1";
     nativeBuildInputs = [ pkg-config ];
     buildInputs = guiLibs ++ [ gtk3 ];
   };

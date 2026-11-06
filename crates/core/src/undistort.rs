@@ -142,7 +142,7 @@ impl LensOnlyParams {
 
     /// PINHOLE intrinsics of the *undistorted output*, for the manifest and cameras.txt.
     pub fn output_intrinsics(&self) -> Result<[f64; 4]> {
-        let k = self.lens.get_camera_matrix((self.in_w, self.in_h), false);
+        let k = self.lens.get_camera_matrix((self.in_w, self.in_h));
         // The matrix comes back at CALIBRATION resolution; scale it as get_lens_data_at_timestamp does.
         let calib_w = self.lens.calib_dimension.w as f64;
         let calib_h = self.lens.calib_dimension.h as f64;

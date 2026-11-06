@@ -3,9 +3,6 @@ default:
 
 ci: fmt-check clippy test
 
-setup:
-    ./scripts/prepare-gyroflow-checkout.sh
-
 fmt:
     cargo fmt --all
 

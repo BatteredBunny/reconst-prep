@@ -1,3 +1,6 @@
 # A clean Windows install has no VCRUNTIME140.dll, and the installer does not ship the redistributable.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+GYROFLOW_SKIP_LENS_PROFILE_DOWNLOAD = "1"

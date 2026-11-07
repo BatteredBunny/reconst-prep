@@ -54,7 +54,7 @@ let
   common = {
     inherit src;
     pname = "reconst-prep";
-    version = "0.1.0";
+    version = "0.2.0";
     strictDeps = true;
     GYROFLOW_SKIP_LENS_PROFILE_DOWNLOAD = "1";
     # Stylo generates Rust CSS property definitions with its vendored Python modules.

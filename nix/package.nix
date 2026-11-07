@@ -3,6 +3,7 @@
   stdenv,
   craneLib,
   pkg-config,
+  python3,
   makeWrapper,
   installShellFiles,
   versionCheckHook,
@@ -56,7 +57,11 @@ let
     version = "0.1.0";
     strictDeps = true;
     GYROFLOW_SKIP_LENS_PROFILE_DOWNLOAD = "1";
-    nativeBuildInputs = [ pkg-config ];
+    # Stylo generates Rust CSS property definitions with its vendored Python modules.
+    nativeBuildInputs = [
+      pkg-config
+      python3
+    ];
     buildInputs = guiLibs ++ [ gtk3 ];
   };
 

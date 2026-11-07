@@ -20,9 +20,6 @@ pub const GYROFLOW_CORE_REV: &str = "f6cd36bfd1a0cd0152c8b87cd5eead2a232824e1";
 pub const TOOL_NAME: &str = "reconst-prep";
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Sent with every outbound HTTP request (GitHub rejects requests without one).
-pub const USER_AGENT: &str = concat!("reconst-prep/", env!("CARGO_PKG_VERSION"));
-
 /// Every network request goes through here, so none goes out without the user agent GitHub insists on, or without a timeout.
 pub(crate) fn http_get(
     url: &str,
@@ -30,7 +27,10 @@ pub(crate) fn http_get(
 ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
     use anyhow::Context as _;
     ureq::get(url)
-        .header("User-Agent", USER_AGENT)
+        .header(
+            "User-Agent",
+            concat!("reconst-prep/", env!("CARGO_PKG_VERSION")),
+        )
         .config()
         .timeout_global(Some(timeout))
         .build()

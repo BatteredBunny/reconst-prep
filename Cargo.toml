@@ -24,11 +24,18 @@ clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
 anyhow = "1.0.104"
 thiserror = "2.0.21"
-eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
-egui = "0.37.0"
-# Main egui-phosphor has no egui 0.37 support yet :(
-# amPerl/egui-phosphor#44
-egui-phosphor = { git = "https://github.com/UnknownSuperficialNight/egui-phosphor.git", rev = "9f59d7cc83091345b250cb438986760096d5cc15" }
+# Pin Blitz: native events, mounted geometry and custom raster widgets are newer than 0.7.10.
+dioxus = { version = "=0.8.0-alpha.3", default-features = false, features = ["macro", "html", "signals", "hooks"] }
+dioxus-native = { git = "https://github.com/DioxusLabs/blitz", rev = "5be96ed0e621f1b52b71b2206a2c3a54e90c0b5c", default-features = false, features = ["vello-hybrid", "svg", "system-fonts", "accessibility"] }
+blitz-shell = { git = "https://github.com/DioxusLabs/blitz", rev = "5be96ed0e621f1b52b71b2206a2c3a54e90c0b5c", default-features = false }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "5be96ed0e621f1b52b71b2206a2c3a54e90c0b5c", default-features = false }
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "5be96ed0e621f1b52b71b2206a2c3a54e90c0b5c", default-features = false }
+# Match Blitz's source identity to share renderer types; Cargo.lock pins the commit.
+anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+peniko = "0.6"
+webbrowser = "1.2.6"
+async-channel = "2.5.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time"] }
 rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
 log = "0.4.34"
 env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }

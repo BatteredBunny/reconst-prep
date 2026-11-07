@@ -95,6 +95,7 @@
                 rustfmt
                 just
                 pkg-config
+                python3
                 ffmpeg
                 gtk3
                 glib

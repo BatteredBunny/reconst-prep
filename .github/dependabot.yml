@@ -5,11 +5,13 @@ updates:
     schedule:
       interval: "daily"
     groups:
-      egui:
+      native-ui:
         patterns:
-          - "eframe"
-          - "egui"
-          - "egui-phosphor"
+          - "dioxus*"
+          - "blitz*"
+          - "anyrender*"
+          - "peniko"
+          - "winit"
       cargo-minor-patch:
         patterns:
           - "*"

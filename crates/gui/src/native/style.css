@@ -1,0 +1,270 @@
+/* Document base and the workspace shell. Component styles live beside their components. */
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--bg-workspace);
+    color: var(--text-primary);
+    font-family: 'Nordwand Mono', monospace;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+body { overflow: hidden; }
+input, select { font: inherit; }
+a {
+    color: var(--accent-text);
+    text-decoration: none;
+    border-radius: 4px;
+
+    &:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+h1, h2, h3, p { margin: 0; font-weight: 400; }
+
+.icon { width: 16px; height: 16px; flex-shrink: 0; }
+
+.bar-spacer { flex: 1; min-width: 4px; }
+
+/* ── Shell ───────────────────────────────────────────── */
+.shell {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.shell-main {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+.viewer {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-workspace);
+}
+
+/* ── Notices ─────────────────────────────────────────── */
+.notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-tertiary);
+
+    .icon { width: 14px; height: 14px; margin-top: 1px; }
+    p { overflow-wrap: anywhere; }
+
+    &[data-tone="warning"],
+    &[data-tone="error"] {
+        padding: 8px 10px;
+        border-radius: var(--radius);
+    }
+    &[data-tone="warning"] { color: var(--warning); background: var(--warning-soft); }
+    &[data-tone="error"] { color: var(--danger); background: var(--danger-soft); }
+}
+
+/* ── Overlays ────────────────────────────────────────── */
+.toasts {
+    position: fixed;
+    right: 16px;
+    bottom: 76px;
+    z-index: var(--z-toast);
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.toast {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 8px 10px 14px;
+    background: var(--bg-menu);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-lg);
+    font-size: 12px;
+
+    span { flex: 1; }
+}
+
+.drop-overlay {
+    position: fixed;
+    inset: 12px;
+    z-index: var(--z-drop);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px dashed var(--accent);
+    border-radius: var(--radius-lg);
+    background: #121212ee;
+    color: var(--accent-text);
+    font-size: 18px;
+}
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: #0b0b0bcc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: var(--z-modal);
+}
+
+.modal {
+    width: 560px;
+    max-width: 90%;
+    max-height: 85%;
+    background: var(--bg-menu);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-float);
+    display: flex;
+    flex-direction: column;
+
+    /* Focus parks on the dialog itself when it has no field; that is not a choice to highlight. */
+    &:focus { outline: none; }
+}
+
+.modal-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 12px 4px 20px;
+
+    h2 { font-size: 15px; font-weight: 500; }
+}
+
+.modal-body {
+    overflow-y: scroll;
+    display: flex;
+    flex-direction: column;
+    padding: 8px 20px 20px;
+    gap: 10px;
+    color: var(--text-secondary);
+
+    /* The body scrolls; without this its rows squash to fit instead. */
+    > * { flex-shrink: 0; }
+    h3 { font-size: 12px; color: var(--text-tertiary); margin-top: 6px; }
+    input[type=search] {
+        height: 34px;
+        padding: 0 12px;
+        border-radius: var(--radius);
+        border: 1px solid var(--divider);
+        background: var(--bg-field);
+        color: var(--text-primary);
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+}
+
+.modal-separator { height: 1px; margin: 4px 0; background: var(--divider); }
+.modal-hint { font-size: 12px; color: var(--text-tertiary); }
+.modal-actions { display: flex; gap: 8px; margin-top: 6px; }
+.path {
+    font-size: 11px;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+}
+
+/* Block flow, not a flex column: rows in a scrolling flex column get squashed to fit. */
+.profile-results {
+    max-height: 330px;
+    overflow-y: scroll;
+
+    > * + * { margin-top: 2px; }
+}
+
+.summary-total {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    color: var(--text-primary);
+
+    strong { font-size: 30px; font-weight: 500; color: var(--accent-text); }
+    span { font-size: 12px; color: var(--text-tertiary); text-transform: lowercase; }
+}
+
+/* ── Popover ─────────────────────────────────────────── */
+/* The window-wide layer holds the panel; see Popover in overlays.rs for why it must. */
+.popover-layer {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-popover);
+}
+.popover {
+    position: absolute;
+    padding: 8px;
+    background: var(--bg-menu);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-float);
+}
+
+/* ── Drag layer ──────────────────────────────────────── */
+.drag-layer {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-drag);
+}
+
+/* ── Halftone ────────────────────────────────────────── */
+.halftone {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+}
+/* Decorative layers overhang their box, and Blitz hit-tests overflow even where it is clipped.
+   They opt out, children included: Blitz still tests the children of a pointer-events: none box.
+   TODO: replace with native implementation once fixed by blitz (clipped hit testing): drop the * rules. */
+.halftone, .halftone *,
+.run-progress-track, .run-progress-track * { pointer-events: none; }
+
+/* ── Spinner ─────────────────────────────────────────── */
+.spinner {
+    display: block;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    border: 2px solid var(--control-track);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+
+    &.spinner--large { width: 22px; height: 22px; border-width: 2.5px; }
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ── Scroll fade ─────────────────────────────────────── */
+.scroll-fade { position: relative; }
+.scroll-fade-edge {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 28px;
+    pointer-events: none;
+}
+/* Fades to the surface the list sits on; every list using it sits on --bg-menu. */
+.scroll-fade-edge--top { top: 0; background: linear-gradient(to bottom, var(--bg-menu), transparent); }
+.scroll-fade-edge--bottom { bottom: 0; background: linear-gradient(to top, var(--bg-menu), transparent); }
+.scroll-fade-thumb {
+    position: absolute;
+    right: 1px;
+    width: 3px;
+    border-radius: 1.5px;
+    background: var(--text-disabled);
+    pointer-events: none;
+}

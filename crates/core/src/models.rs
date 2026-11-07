@@ -54,14 +54,8 @@ pub fn cache_dir() -> Result<PathBuf> {
 
 /// Every `.onnx` in the cache, sorted, catalogued or hand-imported alike.
 pub fn cached() -> Vec<PathBuf> {
-    let Ok(dir) = cache_dir() else {
-        return vec![];
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    let mut out: Vec<PathBuf> = entries
-        .flatten()
+    let entries = cache_dir().ok().and_then(|dir| std::fs::read_dir(dir).ok());
+    let mut out: Vec<PathBuf> = (entries.into_iter().flatten().flatten())
         .map(|e| e.path())
         .filter(|p| {
             p.extension()
@@ -77,22 +71,8 @@ fn local_path(entry: &CatalogueEntry) -> Result<PathBuf> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    use std::io::Read as _;
-
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 128 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex(&hasher.finalize()))
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(hex(&Sha256::digest(bytes)))
 }
 
 /// A present file is reused only when its hash matches, otherwise a truncated download would be permanent.

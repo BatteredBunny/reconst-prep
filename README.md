@@ -17,8 +17,6 @@ Works with drone footage, phone footage and anything else that might need clean 
 # GUI
 
 Open it from your launcher, or run `reconst-prep gui` (optionally with clips, `--profile` and `--out`).
-Drop videos onto the window, pick an output folder and press Process.
-The preview on the right shows the frame before and after your settings, drag the divider to compare.
 
 <img src="assets/screenshots/main.png" width="1280" alt="reconst-prep GUI with a before/after preview of undistorted, sky-masked drone footage">
 
@@ -26,23 +24,23 @@ The preview on the right shows the frame before and after your settings, drag th
 
 Lens correction undistorts fisheye footage with a Gyroflow lens profile, either from a file or searched from Gyroflow's database:
 
-<img src="assets/screenshots/lens.png" width="626" alt="Lens correction panel">
+<img src="assets/screenshots/lens.png" width="624" alt="Lens correction panel">
 
 ## Feature detection
 
-Sky and people masking, with tunable sky detection. People masking needs a segmentation model, which can be downloaded from its advanced options:
+Sky and people masking, with sky detection tuned in place. People masking needs a segmentation model, which the inspector offers to download or pick from a file:
 
-<img src="assets/screenshots/masking.png" width="909" alt="Masking panel">
+<img src="assets/screenshots/masking.png" width="813" alt="Masking panel">
 
 ## Frame selection algorithms
 
-Frame selection keeps a frame once the camera has moved enough (or every Nth frame), filters drop blurry frames, and output sets the size and image format:
+The Frames tab keeps a frame once the camera has moved enough (or every Nth frame) and filters blurry frames; the Output tab sets the size and image format:
 
-<img src="assets/screenshots/selection.png" width="721" alt="Frame selection, filters and output panels">
+<img src="assets/screenshots/selection.png" width="658" alt="Frame selection and blur filter in the inspector">
 
-Processing shows progress per clip and how many frames were kept:
+While processing, the bottom bar shows progress per clip and the estimated time remaining:
 
-<img src="assets/screenshots/processing.png" width="745" alt="A run in progress">
+<img src="assets/screenshots/processing.png" width="1280" alt="A run in progress">
 
 # CLI
 

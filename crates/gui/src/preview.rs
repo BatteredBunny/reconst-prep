@@ -39,7 +39,7 @@ pub struct PreviewData {
     pub start_s: f64,
     /// Also the number in the output filenames.
     pub frame_index: u64,
-    /// Fitted into the output's display box so the two can be wiped against each other in one rect.
+    /// Fitted into the output's display box so flipping between the two keeps the frame in place.
     pub source: DisplayImage,
     /// The frame as it will be written.
     pub output: DisplayImage,
@@ -105,7 +105,7 @@ pub fn duration_of(info: &ClipInfo) -> Option<f64> {
         .or_else(|| info.frames.map(|f| f as f64 / info.fps.max(1.0)))
 }
 
-/// Cover and crop, never stretch: fitting-and-padding would put the two sides of the wipe at different scales.
+/// Cover and crop, never stretch: fitting-and-padding would put before and after at different scales.
 fn fit_into(rgb: &Rgb8, frame: Size) -> Result<DisplayImage> {
     let size = rgb.size();
     let scale = (frame.w as f64 / size.w as f64).max(frame.h as f64 / size.h as f64);
@@ -164,7 +164,7 @@ fn build_overlay(layers: &[(MaskClass, Mask)], size: Size) -> Option<DisplayImag
 
 /// Every update repaints the pane, so the preview assembles on screen instead of appearing complete after the slowest step.
 pub enum PreviewUpdate {
-    /// The decoded frame, untouched, on both sides of the wipe.
+    /// The decoded frame, untouched: what Before shows.
     Raw(Box<PreviewData>),
     /// An expensive step has started; the header names it beside a spinner.
     Stage(&'static str),
@@ -201,7 +201,7 @@ pub fn build_preview(
     );
     let t_decode = t0.elapsed().as_secs_f64();
 
-    // The raw frame goes up before any work starts, on both sides of the wipe.
+    // The raw frame goes up before any work starts, as both Before and the stand-in result.
     let display = display_size(out_size);
     let source = fit_into(&frame.rgb, display)?;
     emit(PreviewUpdate::Raw(Box::new(PreviewData {

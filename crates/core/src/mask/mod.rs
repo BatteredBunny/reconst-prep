@@ -61,37 +61,18 @@ impl Mask {
             return;
         }
         let ((w, h), r) = (self.size.as_usize(), r as usize);
-        // One scratch buffer, swapped between the passes.
-        let mut scratch = self.data.clone();
-        for y in 0..h {
-            let row = y * w;
-            for x in 0..w {
-                if self.data[row + x] == 0 {
-                    continue;
-                }
-                let lo = x.saturating_sub(r);
-                let hi = (x + r).min(w - 1);
-                if self.data[row + lo..=row + hi].contains(&0) {
-                    scratch[row + x] = 0;
+        // Separable: along rows, then along columns of that result. (length, stride, lines, line stride)
+        for (len, step, lines, line_step) in [(w, 1, h, w), (h, w, w, 1)] {
+            let src = self.data.clone();
+            for line in (0..lines).map(|l| l * line_step) {
+                for i in 0..len {
+                    let (lo, hi) = (i.saturating_sub(r), (i + r).min(len - 1));
+                    if (lo..=hi).any(|j| src[line + j * step] == 0) {
+                        self.data[line + i * step] = 0;
+                    }
                 }
             }
         }
-        std::mem::swap(&mut self.data, &mut scratch);
-        scratch.copy_from_slice(&self.data);
-        for y in 0..h {
-            let row = y * w;
-            for x in 0..w {
-                if self.data[row + x] == 0 {
-                    continue;
-                }
-                let lo = y.saturating_sub(r);
-                let hi = (y + r).min(h - 1);
-                if (lo..=hi).any(|yy| self.data[yy * w + x] == 0) {
-                    scratch[row + x] = 0;
-                }
-            }
-        }
-        std::mem::swap(&mut self.data, &mut scratch);
     }
 }
 
@@ -382,10 +363,6 @@ pub struct FrameJudgement {
 }
 
 impl PreparedMask {
-    pub fn config(&self) -> &MaskConfig {
-        &self.cfg
-    }
-
     /// Opening a model reloads, optimises and test-runs it, so a change that leaves
     /// the model request and the frame alone keeps the one already open.
     pub fn reconfigure(&self, cfg: &MaskConfig, frame: Size) -> Result<Self> {

@@ -61,7 +61,7 @@ impl ManifestClip {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ManifestTotals {
     pub decoded: u64,
     pub kept: u64,
@@ -109,14 +109,7 @@ impl RunManifest {
             profile,
             params,
             clips: Vec::new(),
-            totals: ManifestTotals {
-                decoded: 0,
-                kept: 0,
-                written: 0,
-                wall_seconds: 0.0,
-                decoded_fps: 0.0,
-                written_fps: 0.0,
-            },
+            totals: ManifestTotals::default(),
         }
     }
 
@@ -226,32 +219,18 @@ mod tests {
     use crate::select::{SelectionConfig, SelectionMode};
 
     fn manifest(size: OutputSpec) -> RunManifest {
+        let params = ManifestParams {
+            output_size: size,
+            format: ImageFormat::Jpeg { quality: 95 },
+            selection: SelectionConfig::default(),
+            gpu: false,
+            hwaccel: HwAccel::Auto,
+            interpolation: Interp::Lanczos4,
+            masking: None,
+        };
         RunManifest {
-            tool: "reconst-prep".into(),
-            tool_version: "0.1.0".into(),
-            gyroflow_core_rev: "deadbeef".into(),
-            ffmpeg_version: "ffmpeg 8".into(),
-            created_unix: 0,
             completed: true,
-            profile: None,
-            params: ManifestParams {
-                output_size: size,
-                format: ImageFormat::Jpeg { quality: 95 },
-                selection: SelectionConfig::default(),
-                gpu: false,
-                hwaccel: HwAccel::Auto,
-                interpolation: Interp::Lanczos4,
-                masking: None,
-            },
-            clips: vec![],
-            totals: ManifestTotals {
-                decoded: 0,
-                kept: 0,
-                written: 0,
-                wall_seconds: 0.0,
-                decoded_fps: 0.0,
-                written_fps: 0.0,
-            },
+            ..RunManifest::new("ffmpeg 8".into(), None, params)
         }
     }
 

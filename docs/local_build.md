@@ -13,6 +13,7 @@ reconst-prep is a Rust project with one binary which includes both the CLI and t
 |---|---|
 | Rust | stable, pinned in `rust-toolchain.toml` |
 | C toolchain | gcc/clang on Linux, MSVC build tools on Windows |
+| Python 3 | Required by Blitz/Stylo |
 | GTK 3 headers | Linux only, for the file dialogs |
 
 ## Ubuntu
@@ -37,7 +38,7 @@ statically (`.cargo/config.toml`), so the binary runs without the Visual C++ red
 In PowerShell, from the repository root:
 
 ```powershell
-# Install dependencies: rustup, MSVC build tools, .NET SDK
+# Install dependencies: rustup, MSVC build tools, Python 3, .NET SDK
 powershell -ExecutionPolicy Bypass -File scripts\install-deps-windows.ps1 -InstallPrerequisites
 
 # Build the installer

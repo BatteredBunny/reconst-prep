@@ -42,6 +42,7 @@ need() {
 # The C compiler links the final binary and builds ring.
 command -v cc >/dev/null || need "C compiler (cc)" build-essential
 command -v pkg-config >/dev/null || need "pkg-config" pkg-config
+command -v python3 >/dev/null || need "Python 3 (Stylo CSS generator)" python3
 command -v curl >/dev/null || need "curl" curl ca-certificates
 # rfd's file dialogs link GTK 3; this is the only native library linked at build time.
 pkg-config --exists gtk+-3.0 2>/dev/null || need "GTK 3 headers (gtk+-3.0)" libgtk-3-dev

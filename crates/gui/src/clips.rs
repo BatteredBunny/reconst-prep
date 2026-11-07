@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use eframe::egui;
+use crate::native::images::ImageSource;
 
 use reconst_prep_core::decode::ClipInfo;
 use reconst_prep_core::frame::Size;
@@ -13,7 +13,6 @@ use crate::preview;
 
 #[derive(Default)]
 pub(crate) struct ClipLibrary {
-    /// What the user chose: files and directories, not yet expanded.
     inputs: Vec<PathBuf>,
     /// Cached because expanding walks the filesystem and the UI asks several times per frame.
     expanded: Vec<PathBuf>,
@@ -24,7 +23,7 @@ pub(crate) struct ClipLibrary {
     /// Separate from `probes`, where every entry is an answer.
     probes_pending: HashSet<PathBuf>,
     /// `None` means tried and failed, which is what stops it being retried every frame.
-    thumbs: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    thumbs: HashMap<PathBuf, Option<ImageSource>>,
     /// Capped so a dropped folder of two hundred clips does not spawn a thread each.
     thumbs_running: usize,
     /// Separate from `thumbs`, where `None` means "tried and failed".
@@ -41,6 +40,11 @@ impl ClipLibrary {
         let before = self.expanded.len();
         self.expanded =
             reconst_prep_core::pipeline::expand_inputs(&self.inputs).unwrap_or_default();
+        // Removing a folder must release its children's cached pixels too. Keep pending
+        // workers accounted for until their replies arrive, but not their old results.
+        let active: HashSet<_> = self.expanded.iter().collect();
+        self.probes.retain(|path, _| active.contains(path));
+        self.thumbs.retain(|path, _| active.contains(path));
         if self.expanded.len() != before {
             log::info!(
                 "input list: {} clip{} from {} path{}",
@@ -65,7 +69,7 @@ impl ClipLibrary {
         self.probes.get(path)
     }
 
-    pub fn thumb(&self, path: &Path) -> Option<&Option<egui::TextureHandle>> {
+    pub fn thumb(&self, path: &Path) -> Option<&Option<ImageSource>> {
         self.thumbs.get(path)
     }
 
@@ -78,23 +82,24 @@ impl ClipLibrary {
         new
     }
 
-    /// Everything about one clip, so a removal cannot leave a stale map behind.
+    /// Remove displayed/cached data while retaining accounting for workers still in flight.
     pub fn remove(&mut self, path: &Path) {
         self.inputs.retain(|i| i != path);
         self.probes.remove(path);
-        self.probes_pending.remove(path);
+        // Workers still running count against the cap until their answers arrive.
         self.thumbs.remove(path);
-        self.thumbs_pending.remove(path);
     }
 
     pub fn clear(&mut self) {
         let running = self.thumbs_running;
         let probing = std::mem::take(&mut self.probes_pending);
+        let thumbnails = std::mem::take(&mut self.thumbs_pending);
         *self = Self::default();
         // In-flight workers still report back, and their answers are dropped by
         // `on_thumbnail`/`on_probed`; what they hold must still count against the caps.
         self.thumbs_running = running;
         self.probes_pending = probing;
+        self.thumbs_pending = thumbnails;
     }
 
     /// Probed info for every clip, in run order, skipping ones that failed.
@@ -122,10 +127,6 @@ impl ClipLibrary {
         sizes.sort_unstable_by_key(|s| (s.w, s.h));
         sizes.dedup();
         sizes
-    }
-
-    pub fn probing(&self, path: &Path) -> bool {
-        self.probes_pending.contains(path)
     }
 
     /// The next clip with no probe, claimed so the same file is not probed twice.
@@ -169,11 +170,59 @@ impl ClipLibrary {
         }
     }
 
-    pub fn on_thumbnail(&mut self, path: PathBuf, tex: Option<egui::TextureHandle>) {
+    pub fn on_thumbnail(&mut self, path: PathBuf, tex: Option<ImageSource>) {
         self.thumbs_running = self.thumbs_running.saturating_sub(1);
         self.thumbs_pending.remove(&path);
         if self.inputs.contains(&path) || self.expanded.contains(&path) {
             self.thumbs.insert(path, tex);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn removing_a_folder_releases_its_child_caches() {
+        let folder = PathBuf::from("footage");
+        let child = folder.join("clip.mp4");
+        let mut clips = ClipLibrary {
+            inputs: vec![folder.clone()],
+            expanded_from: vec![folder.clone()],
+            expanded: vec![child.clone()],
+            ..ClipLibrary::default()
+        };
+        clips.probes.insert(child.clone(), Err("unreadable".into()));
+        clips.thumbs.insert(child, None);
+        clips.remove(&folder);
+        clips.refresh();
+        assert!(clips.files().is_empty());
+        assert!(clips.probes.is_empty());
+        assert!(clips.thumbs.is_empty());
+    }
+
+    #[test]
+    fn removing_and_readding_does_not_release_inflight_worker_slots() {
+        let path = PathBuf::from("clip.mp4");
+        let mut clips = ClipLibrary::default();
+        clips.inputs.push(path.clone());
+        clips.expanded.push(path.clone());
+        assert_eq!(clips.claim_unprobed(1), Some(path.clone()));
+        clips.thumbs_pending.insert(path.clone());
+        clips.thumbs_running = 1;
+        clips.remove(&path);
+        clips.add(path.clone());
+        assert!(clips.claim_unprobed(1).is_none());
+        assert!(clips.thumbs_pending.contains(&path));
+        assert_eq!(clips.thumbs_running, 1);
+        clips.clear();
+        clips.add(path.clone());
+        assert!(clips.probes_pending.contains(&path));
+        assert!(clips.thumbs_pending.contains(&path));
+        clips.on_probed(path.clone(), Err("unreadable".into()));
+        clips.on_thumbnail(path.clone(), None);
+        assert!(!clips.probes_pending.contains(&path));
+        assert!(!clips.thumbs_pending.contains(&path));
+        assert_eq!(clips.thumbs_running, 0);
     }
 }

@@ -1,0 +1,7 @@
+Official source: https://github.com/phosphor-icons/core
+Fetched regular weight icons from main archive on 2026-11-06.
+Additional regular-weight glyphs (sliders-horizontal, eye, columns, arrow-counter-clockwise,
+folder-simple, check, caret-up, frame-corners, magnifying-glass-plus/minus, sun, person, cpu,
+warning-circle, square-half, stack) were converted to 256-unit SVG paths from Phosphor.ttf as
+shipped in the egui-phosphor 0.13.0 crate (same Phosphor Icons, MIT).
+Cloud (regular, U+E1AA) uses the same Phosphor.ttf source and 256-unit conversion.

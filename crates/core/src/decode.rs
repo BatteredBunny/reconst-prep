@@ -60,11 +60,7 @@ pub struct Ffmpeg {
 
 /// Only for looking in a known directory; `PATH` resolution needs no suffix on any platform.
 fn exe_name(stem: &str) -> String {
-    if cfg!(windows) {
-        format!("{stem}.exe")
-    } else {
-        stem.to_string()
-    }
+    format!("{stem}{}", std::env::consts::EXE_SUFFIX)
 }
 
 /// Typed so a frontend can say how to point at ffmpeg its own way.
@@ -110,17 +106,8 @@ impl Ffmpeg {
             .unwrap_or("unknown")
             .to_string();
 
-        // ffprobe: same directory as the resolved ffmpeg, else PATH.
-        let probe_name = exe_name("ffprobe");
-        let candidate = if ffmpeg
-            .parent()
-            .map(|p| !p.as_os_str().is_empty())
-            .unwrap_or(false)
-        {
-            ffmpeg.with_file_name(probe_name)
-        } else {
-            PathBuf::from(probe_name)
-        };
+        // Beside the resolved ffmpeg; a bare `ffmpeg` has no directory, so this is a PATH lookup too.
+        let candidate = ffmpeg.with_file_name(exe_name("ffprobe"));
         let ffprobe = Command::new(&candidate)
             .arg("-version")
             .output()
@@ -198,24 +185,16 @@ pub fn probe_clip(ff: &Ffmpeg, path: &Path) -> Result<ClipInfo> {
         })
         .unwrap_or(0.0);
     check_frame_rate(path, fps)?;
-    let duration_s = stream["duration"]
-        .as_str()
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| {
-            v["format"]["duration"]
-                .as_str()
-                .and_then(|s| s.parse().ok())
-        });
+    // ffprobe reports these as strings.
+    let number = |v: &serde_json::Value| v.as_str()?.parse::<f64>().ok();
+    let duration_s = number(&stream["duration"]).or_else(|| number(&v["format"]["duration"]));
     let frames = stream["nb_frames"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
         .or_else(|| {
-            let dur = duration_s?;
-            if fps > 0.0 {
-                Some((dur * fps).round() as u64)
-            } else {
-                None
-            }
+            duration_s
+                .filter(|_| fps > 0.0)
+                .map(|d| (d * fps).round() as u64)
         });
     let codec = stream["codec_name"].as_str().map(|s| s.to_string());
     let stem = path

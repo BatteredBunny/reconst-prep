@@ -87,9 +87,12 @@ mod tests {
     use super::*;
     use crate::gray::rgb_to_gray;
 
-    fn sky_mask_from_rgb(rgb: &Rgb8, p: SkyParams) -> Mask {
-        let gray = rgb_to_gray(rgb);
-        sky_mask(rgb, &gray, p)
+    fn sky_mask_from_rgb(rgb: &Rgb8, dilate: u32) -> Mask {
+        let p = SkyParams {
+            dilate,
+            ..Default::default()
+        };
+        sky_mask(rgb, &rgb_to_gray(rgb), p)
     }
 
     use super::super::synthetic;
@@ -98,13 +101,7 @@ mod tests {
     fn sky_mask_takes_the_top_and_stops_at_the_horizon() {
         let (w, h) = (64u32, 64u32);
         let rgb = synthetic(w, h);
-        let m = sky_mask_from_rgb(
-            &rgb,
-            SkyParams {
-                dilate: 0,
-                ..Default::default()
-            },
-        );
+        let m = sky_mask_from_rgb(&rgb, 0);
         assert_eq!(m.data[0], 0, "top-left should be masked as sky");
         let bottom = (h as usize - 1) * w as usize;
         assert_eq!(m.data[bottom], 255, "ground must survive");
@@ -123,13 +120,7 @@ mod tests {
                 rgb.data_mut()[i..i + 3].copy_from_slice(&[150, 180, 230]);
             }
         }
-        let m = sky_mask_from_rgb(
-            &rgb,
-            SkyParams {
-                dilate: 0,
-                ..Default::default()
-            },
-        );
+        let m = sky_mask_from_rgb(&rgb, 0);
         assert_eq!(m.data[(26 * w + 12) as usize], 255);
     }
 
@@ -137,20 +128,8 @@ mod tests {
     fn dilate_grows_the_masked_region() {
         let (w, h) = (32u32, 32u32);
         let rgb = synthetic(w, h);
-        let tight = sky_mask_from_rgb(
-            &rgb,
-            SkyParams {
-                dilate: 0,
-                ..Default::default()
-            },
-        );
-        let grown = sky_mask_from_rgb(
-            &rgb,
-            SkyParams {
-                dilate: 2,
-                ..Default::default()
-            },
-        );
+        let tight = sky_mask_from_rgb(&rgb, 0);
+        let grown = sky_mask_from_rgb(&rgb, 2);
         assert!(grown.valid_fraction() < tight.valid_fraction());
     }
 }

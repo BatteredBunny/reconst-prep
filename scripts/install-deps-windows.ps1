@@ -6,7 +6,7 @@ Installs what building reconst-prep and its Velopack installer needs on Windows.
 CI runs this too. Safe to re-run: tools that are already present are skipped.
 
 Without -InstallPrerequisites it only checks Rust (MSVC), the MSVC build tools,
-and the .NET SDK, and stops with the winget commands for whatever is
+Python 3, and the .NET SDK, and stops with the winget commands for whatever is
 missing. With it, the missing ones are installed through winget.
 
 Then installs the Rust toolchain pinned in rust-toolchain.toml and the
@@ -61,6 +61,11 @@ $Prerequisites = @(
         Present = { Test-Msvc }
         Winget = @("Microsoft.VisualStudio.2022.BuildTools", "--override",
             "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended")
+    },
+    @{
+        Name = "Python 3 (for Stylo code generation)"
+        Present = { (Test-Command python) -and ((& python -c "import sys; print(sys.version_info.major)" 2>$null) -eq "3") }
+        Winget = @("Python.Python.3.13")
     },
     @{
         Name = ".NET SDK (for vpk)"

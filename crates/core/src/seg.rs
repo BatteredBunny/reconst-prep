@@ -87,14 +87,9 @@ impl SegConfig {
 
     /// The classes taken from the model, in a fixed order.
     pub fn classes(&self) -> Vec<(MaskClass, SegClassParams)> {
-        let mut out = Vec::new();
-        if let Some(p) = self.sky {
-            out.push((MaskClass::Sky, p));
-        }
-        if let Some(p) = self.people {
-            out.push((MaskClass::People, p));
-        }
-        out
+        let sky = self.sky.map(|p| (MaskClass::Sky, p));
+        let people = self.people.map(|p| (MaskClass::People, p));
+        sky.into_iter().chain(people).collect()
     }
 }
 

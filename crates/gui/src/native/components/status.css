@@ -1,0 +1,115 @@
+/* Run dock: destination, readiness or live progress, and the run actions. */
+.run-dock {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    height: 60px;
+    flex-shrink: 0;
+    padding: 0 14px 0 10px;
+    background: var(--bg-dock);
+
+    /* Above the halftone layer. */
+    > .dock-destination, > .dock-status, > .dock-actions { position: relative; }
+    border-top: 1px solid var(--divider);
+}
+
+.dock-destination { display: flex; min-width: 0; max-width: 42%; flex-shrink: 1; }
+.dest-label { color: var(--text-tertiary); }
+.dest-path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    color: var(--text-primary);
+}
+.dest-missing { color: var(--warning); }
+
+.dock-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+    padding-left: 16px;
+    border-left: 1px solid var(--divider);
+    height: 28px;
+}
+.dock-icon {
+    display: flex;
+
+    &[data-tone="success"] { color: var(--success); }
+    &[data-tone="warning"] { color: var(--warning); }
+    &[data-tone="error"] { color: var(--danger); }
+}
+.dock-primary {
+    flex-shrink: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-primary);
+}
+.dock-facts {
+    flex-shrink: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    color: var(--text-tertiary);
+
+    .run-dock[data-state="running"] & { font-size: 11px; color: var(--text-secondary); }
+}
+
+.dock-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+/* Done so far is a travelling wave; what is left is a flat line after a small gap. */
+.run-progress-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -5px;
+    height: 10px;
+}
+.run-progress-rest {
+    position: absolute;
+    right: 0;
+    top: 4px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--control-track);
+    transition: left 0.2s linear;
+}
+/* An upright stub at the wave's leading edge, spanning the wave's whole swing (2.5px each side
+   of centre, plus the stroke), so wherever the wave ends it touches the stub and the stub's
+   middle meets the track. */
+.run-progress-head {
+    position: absolute;
+    top: 0.75px;
+    width: 2.5px;
+    height: 8.5px;
+    margin-left: -1.25px;
+    border-radius: 1.25px;
+    background: var(--accent);
+    transition: left 0.2s linear;
+}
+.run-progress-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 10px;
+    overflow: hidden;
+    color: var(--accent);
+    transition: width 0.2s linear;
+}
+/* Slides one wavelength (WAVELENGTH in status.rs) per loop, so the loop has no seam. */
+.run-progress-wave {
+    position: absolute;
+    left: 0;
+    top: 0;
+    animation: wave 0.9s linear infinite;
+}
+@keyframes wave {
+    to { transform: translateX(-20px); }
+}

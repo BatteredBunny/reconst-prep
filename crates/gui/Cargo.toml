@@ -12,9 +12,6 @@ path = "src/lib.rs"
 
 [dependencies]
 reconst-prep-core = { path = "../core" }
-eframe.workspace = true
-egui.workspace = true
-egui-phosphor.workspace = true
 log.workspace = true
 rfd.workspace = true
 anyhow.workspace = true
@@ -22,7 +19,14 @@ crossbeam-channel.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+dioxus.workspace = true
+dioxus-native.workspace = true
+blitz-shell.workspace = true
+blitz-traits.workspace = true
+blitz-dom.workspace = true
+webbrowser.workspace = true
+async-channel.workspace = true
+tokio.workspace = true
 
-[dev-dependencies]
-# Demo screenshot rendering
-egui_kittest = { version = "0.37.0", features = ["eframe", "wgpu"] }
+anyrender.workspace = true
+peniko.workspace = true

@@ -1,0 +1,369 @@
+/* Inspector column and the setting primitives it is composed from (rows.rs, controls.rs). */
+.inspector {
+    display: flex;
+    flex-direction: column;
+    width: var(--inspector-width);
+    flex-shrink: 0;
+    min-height: 0;
+    position: relative;
+    background: var(--bg-inspector);
+
+    /* Above the halftone layer. */
+    > :not(.halftone) { position: relative; }
+    border-left: 1px solid var(--divider);
+}
+
+.inspector-tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 48px;
+    flex-shrink: 0;
+    padding: 0 10px;
+}
+
+.tab-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--warning);
+}
+
+.inspector-scope {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    padding: 0 18px 6px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+
+    .icon { width: 12px; height: 12px; }
+}
+
+.inspector-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: scroll;
+    padding: 0 10px 18px;
+
+    /* During a run the panel still scrolls, but its controls take no input. */
+    &[data-locked="true"] > .group { pointer-events: none; opacity: 0.45; }
+}
+.inspector-lock { padding: 4px 8px 10px; }
+
+/* ── Group ───────────────────────────────────────────── */
+.group {
+    padding: 14px 8px;
+    border-top: 1px solid var(--divider);
+
+    .inspector-body > &:first-child { border-top: none; }
+}
+
+.group-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 26px;
+
+    > .icon { color: var(--text-secondary); }
+    h3 { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+}
+.group-trailing { margin-left: auto; display: flex; align-items: center; }
+.group-value {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.group--quiet { padding: 8px 0; }
+
+.nested {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: -2px 0 2px 17px;
+    padding-left: 12px;
+    border-left: 1px solid var(--divider);
+}
+
+/* ── Rows ────────────────────────────────────────────── */
+.row-label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 28px;
+}
+.row-control { display: flex; justify-content: flex-end; min-width: 0; flex-shrink: 1; }
+.setting-row--stacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+
+    .row-control { justify-content: flex-start; }
+    .choice-group { flex: 1; }
+}
+
+.slider-row { display: flex; flex-direction: column; gap: 0; }
+.slider-row-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+
+    .row-label { flex: 1; }
+}
+.row-value {
+    min-width: 44px;
+    text-align: right;
+    font-size: 11px;
+    color: var(--text-primary);
+}
+
+.readout-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-tertiary);
+
+    output {
+        font-size: 11px;
+
+        &[data-tone="ok"] { color: var(--success); }
+        &[data-tone="warn"] { color: var(--warning); }
+    }
+}
+
+/* ── Switch ──────────────────────────────────────────── */
+.switch {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+
+    input {
+        position: absolute;
+        right: 0;
+        top: 0;
+        width: 30px;
+        height: 18px;
+        opacity: 0;
+        margin: 0;
+    }
+    input:focus + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    &[data-checked="true"] .switch-track { background: var(--accent); }
+    &[data-checked="true"] .switch-knob { left: 15px; background: #1b1310; }
+    &:hover .switch-track { background: var(--control-track-hover); }
+    &[data-checked="true"]:hover .switch-track { background: var(--accent-strong); }
+    &[data-disabled="true"] {
+        cursor: default;
+
+        .row-label { color: var(--text-disabled); }
+        .switch-track { background: var(--bg-field); }
+        .switch-knob { background: #3d3d3d; }
+    }
+}
+.switch--labelled {
+    flex: 1;
+    justify-content: space-between;
+    min-height: 28px;
+
+    .row-label { color: var(--text-primary); font-size: 13px; }
+}
+.switch-track {
+    position: relative;
+    width: 30px;
+    height: 18px;
+    flex-shrink: 0;
+    border-radius: 9px;
+    background: var(--control-track);
+}
+.switch-knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 12px;
+    height: 12px;
+    border-radius: 6px;
+    background: #9a9a9a;
+}
+
+/* ── Masking classes ─────────────────────────────────── */
+.mask-class {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    > .icon { color: var(--text-secondary); }
+}
+
+/* ── Choice group ────────────────────────────────────── */
+/* Options share the group's width evenly, so a full-width group reads as one balanced control. */
+.choice-group {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--radius);
+    background: var(--bg-field);
+
+    > .ui-button { flex: 1 1 0; }
+}
+
+/* ── Disclosure ──────────────────────────────────────── */
+.disclosure { display: flex; flex-direction: column; color: var(--text-secondary); }
+.disclosure-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 10px 8px 6px;
+}
+
+/* ── Resource picker ─────────────────────────────────── */
+.resource {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 8px 10px 12px;
+    border-radius: var(--radius);
+    background: var(--bg-field);
+
+    &[data-tone="missing"] {
+        background: var(--warning-soft);
+
+        .resource-icon,
+        .resource-text strong { color: var(--warning); }
+    }
+    &[data-tone="error"] {
+        background: var(--danger-soft);
+
+        .resource-icon { color: var(--danger); }
+    }
+}
+.resource-main { display: flex; gap: 10px; min-width: 0; flex: 1 1 150px; }
+.resource-icon { display: flex; color: var(--text-secondary); padding-top: 2px; }
+.resource-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+
+    strong {
+        font-weight: 500;
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    span { font-size: 11px; color: var(--text-tertiary); }
+}
+.resource-actions { display: flex; flex-wrap: wrap; gap: 2px; margin-left: auto; }
+.resource-progress { flex-basis: 100%; height: 3px; border-radius: 2px; background: var(--control-track); }
+.resource-progress-fill { height: 3px; border-radius: 2px; background: var(--accent); }
+
+/* ── Exact dimensions ────────────────────────────────── */
+.dimension-row { display: flex; align-items: flex-end; gap: 8px; }
+.dimension {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    font-size: 11px;
+    color: var(--text-tertiary);
+
+    input {
+        height: 30px;
+        width: 100%;
+        padding: 0 10px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--divider);
+        background: var(--bg-field);
+        color: var(--text-primary);
+        font-size: 12px;
+
+        &:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    }
+}
+.dimension-times { color: var(--text-tertiary); padding-bottom: 6px; }
+
+/* ── Slider (custom: native range paints no thumb in Blitz) ── */
+/* TODO: replace with native implementation once fixed by blitz (input type=range). */
+.slider {
+    position: relative;
+    height: 18px;
+    width: 100%;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+
+    &:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* The timeline is the stage's own scrubber; a focus ring around it only reads as an error. */
+    &.timeline-scrubber:focus { outline: none; }
+}
+.slider-track, .slider-fill {
+    position: absolute;
+    top: 7px;
+    left: 0;
+    height: 4px;
+    border-radius: 2px;
+    pointer-events: none;
+}
+.slider-track { width: 100%; background: var(--control-track); }
+.slider-fill {
+    background: #8f8f8f;
+
+    .slider:hover & { background: var(--accent); }
+}
+.slider-thumb {
+    position: absolute;
+    top: 3px;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    border-radius: 6px;
+    background: var(--text-primary);
+    pointer-events: none;
+}
+/* ── Picker (custom: native select paints blank in Blitz) ── */
+/* TODO: replace with native implementation once fixed by blitz (select). */
+.picker {
+    position: relative;
+    width: 150px;
+    min-width: 0;
+    border-radius: var(--radius-sm);
+    background: var(--bg-field);
+}
+.picker-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* Floats as a Popover (overlays.rs), so opening it moves nothing and no scroll clips it. */
+.popover.picker-options {
+    padding: 4px;
+    border-radius: var(--radius);
+}
+/* Block flow, not a flex column: rows in a scrolling flex column get squashed to fit. */
+.picker-list {
+    max-height: 220px;
+    overflow-y: scroll;
+
+    > * + * { margin-top: 1px; }
+}

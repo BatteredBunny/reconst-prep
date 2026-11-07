@@ -1,0 +1,57 @@
+:root {
+    --bg-workspace: #121212;
+    --bg-inspector: #0f0f0f;
+    --bg-menu: #161616;
+    --bg-matte: #0a0a0a;
+    --bg-dock: #0d0d0d;
+
+    /* Control surfaces are solid, never translucent white: the halftone panels would show
+       through. Values are the old translucent ones flattened onto --bg-inspector; surfaces on
+       --bg-menu get their own below. */
+    --bg-field: #171717;
+    --surface-hover: #1d1d1d;
+    --surface-pressed: #282828;
+    --surface-selected: #222222;
+
+    --text-primary: #e4e4e4;
+    --text-secondary: #a3a3a3;
+    --text-tertiary: #767676;
+    --text-disabled: #575757;
+
+    --accent: #e2805f;
+    --accent-strong: #ee8f6e;
+    --accent-soft: #2d1f1a;
+    --accent-text: #f2a98f;
+    --warning: #e3b363;
+    --warning-soft: #221e17;
+    --danger: #ec7b7b;
+    --danger-soft: #231919;
+    --success: #8cc79a;
+
+    --divider: #ffffff0d;
+    --control-track: #2a2a2a;
+    --control-track-hover: #373737;
+    --shadow-float: 0 14px 36px #000000b0, 0 2px 8px #00000080;
+
+    --radius-sm: 6px;
+    --radius: 8px;
+    --radius-lg: 12px;
+
+    --inspector-width: 312px;
+
+    /* Every layer above the workspace, in one order: a notice never covers a dialog. */
+    --z-toast: 15;
+    --z-modal: 20;
+    --z-popover: 25;
+    --z-drop: 40;
+    --z-drag: 50;
+}
+
+/* The same surfaces flattened onto --bg-menu, for controls inside menus and dialogs. */
+.popover, .modal, .toast {
+    --bg-field: #1d1d1d;
+    --surface-hover: #242424;
+    --surface-pressed: #2e2e2e;
+    --surface-selected: #282828;
+    --control-track: #303030;
+}

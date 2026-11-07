@@ -1,0 +1,342 @@
+/* Viewer: bar, asset shelf, stage on its matte, transport and seek ruler. */
+
+/* ── Viewer bar ──────────────────────────────────────── */
+.viewer-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 48px;
+    flex-shrink: 0;
+    padding: 0 12px 0 10px;
+}
+
+.app-icon { width: 20px; height: 20px; }
+.bar-divider {
+    width: 1px;
+    height: 20px;
+    margin: 0 8px;
+    flex-shrink: 0;
+    background: var(--divider);
+}
+
+.switcher-name { max-width: 220px; min-width: 0; }
+.switcher-count {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+.viewer-empty-title { display: flex; align-items: center; gap: 8px; padding: 0 8px; color: var(--warning); }
+
+
+/* ── Asset shelf (floats under the switcher) ─────────── */
+.asset-shelf {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 500px;
+}
+
+.shelf-track {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    max-height: 360px;
+    overflow-y: scroll;
+}
+
+.asset-card {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    flex-shrink: 0;
+    width: 238px;
+    border-radius: var(--radius);
+
+    &:hover { background: var(--surface-hover); }
+    &[data-selected="true"] { background: var(--surface-selected); }
+}
+
+button.asset-select {
+    font: inherit;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+    padding: 6px;
+    border: none;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+
+    &:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+}
+
+.asset-thumb {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 44px;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: var(--bg-matte);
+    color: var(--text-tertiary);
+
+    .asset-card[data-selected="true"] & { outline: 2px solid var(--accent); outline-offset: 1px; }
+}
+
+.thumbnail {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.asset-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+/* Room on the right for the remove button that overlaps the name line. */
+.asset-name { font-size: 12px; margin-right: 22px; }
+.asset-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
+    .asset-card[data-failed="true"] & { color: var(--danger); }
+}
+.asset-remove { position: absolute; top: 4px; right: 4px; }
+
+.asset-folder {
+    display: flex;
+    height: 32px;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 0 4px 0 10px;
+    border-radius: var(--radius);
+    background: var(--bg-field);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.shelf-actions {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex-shrink: 0;
+    padding-left: 4px;
+}
+
+/* ── Stage ───────────────────────────────────────────── */
+.stage-area {
+    position: relative;
+    flex: 1;
+    min-height: 120px;
+    margin: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-lg);
+    background: var(--bg-matte);
+    overflow: hidden;
+}
+
+.image-stage {
+    position: relative;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: 3px;
+    background: #070707;
+    cursor: grab;
+}
+
+.image-transform {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    transform-origin: center;
+}
+
+.preview-image {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.stage-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+.stage-loading-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-lg);
+    background: #0a0a0ae0;
+    box-shadow: var(--shadow-float);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.stage-error {
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 14px;
+}
+
+.stage-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-tertiary);
+
+    .icon { width: 28px; height: 28px; }
+}
+
+/* ── Empty workspace ─────────────────────────────────── */
+.import-prompt {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    max-width: 380px;
+    padding: 24px;
+    text-align: center;
+
+    h2 { font-size: 17px; color: var(--text-primary); }
+    p { font-size: 13px; color: var(--text-secondary); }
+}
+.import-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    margin-bottom: 6px;
+    border-radius: 16px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+
+    .icon { width: 26px; height: 26px; }
+}
+.import-actions { display: flex; gap: 6px; margin-top: 8px; }
+.import-note { margin-top: 8px; font-size: 11px; color: var(--text-tertiary); }
+
+/* ── Transport ───────────────────────────────────────── */
+.transport {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 44px;
+    flex-shrink: 0;
+    padding: 0 12px 0 10px;
+}
+.transport-cluster { display: flex; align-items: center; gap: 2px; }
+.timecode {
+    font-size: 12px;
+    white-space: nowrap;
+}
+.timecode-now { color: var(--text-primary); }
+.timecode-total { color: var(--text-tertiary); }
+.transport-fact {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+}
+.zoom-readout {
+    display: inline-block;
+    min-width: 40px;
+    text-align: center;
+    font-size: 11px;
+}
+
+/* ── Seek ruler ──────────────────────────────────────── */
+.seek {
+    flex-shrink: 0;
+    padding: 0 14px 12px;
+}
+.slider.timeline-scrubber {
+    position: relative;
+    height: 40px;
+    width: 100%;
+    border-radius: var(--radius-sm);
+
+    &:hover .timeline-track { background: #070707; }
+}
+.timeline-track {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 26px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-matte);
+    pointer-events: none;
+}
+.timeline-tick {
+    position: absolute;
+    bottom: 0;
+    width: 1px;
+    pointer-events: none;
+
+    &.minor { height: 6px; background: #ffffff14; }
+    &.major { height: 12px; background: #ffffff2e; }
+}
+.timeline-playhead {
+    position: absolute;
+    top: 0;
+    height: 26px;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--accent);
+}
+.timeline-grab {
+    position: absolute;
+    top: -2px;
+    left: -5px;
+    width: 12px;
+    height: 8px;
+    border-radius: 3px;
+    background: var(--accent);
+}
+.timeline-time {
+    position: absolute;
+    top: 28px;
+    width: 40px;
+    margin-left: -20px;
+    font-size: 10px;
+    line-height: 12px;
+    color: var(--text-tertiary);
+    text-align: center;
+    pointer-events: none;
+
+    &.first { margin-left: 0; text-align: left; }
+    &.last { margin-left: -40px; text-align: right; }
+}
+
+/* ── Marquee ─────────────────────────────────────────── */
+/* Decor.rs lays out only what fits plus one character, so the text never overhangs far. */
+.marquee {
+    display: flex;
+    overflow: hidden;
+    /* pre, not nowrap: the gap between loops is a run of spaces that must not collapse. */
+    white-space: pre;
+}
+.marquee-text { flex-shrink: 0; }

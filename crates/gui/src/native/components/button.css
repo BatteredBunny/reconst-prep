@@ -1,0 +1,99 @@
+/* The shared button owns every visual state. Compositions size it with props, not overrides. */
+button.ui-button {
+    font: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    gap: 7px;
+    height: 32px;
+    padding: 0 10px;
+    border: none;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 400;
+    white-space: nowrap;
+    cursor: pointer;
+
+    .icon { width: 16px; height: 16px; flex-shrink: 0; }
+
+    &:hover:not(:disabled) {
+        background: var(--surface-hover);
+        color: var(--text-primary);
+    }
+    &:active:not(:disabled) {
+        background: var(--surface-pressed);
+    }
+    &[aria-pressed="true"],
+    &[aria-selected="true"] {
+        background: var(--surface-selected);
+        color: var(--text-primary);
+    }
+    /* Blitz does not match :focus-visible; :focus keeps keyboard focus visible.
+       TODO: replace with native implementation once fixed by blitz (:focus-visible). */
+    &:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+    }
+    &:disabled {
+        color: var(--text-disabled);
+        background: transparent;
+        cursor: default;
+    }
+}
+
+button.ui-button--small {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
+    gap: 6px;
+    border-radius: var(--radius-sm);
+
+    .icon { width: 14px; height: 14px; }
+}
+button.ui-button--large { height: 36px; padding: 0 16px; font-size: 13px; }
+
+button.ui-button--icon-normal,
+button.ui-button--icon-small {
+    padding: 0;
+    color: var(--text-secondary);
+}
+button.ui-button--icon-normal { width: 30px; height: 30px; }
+button.ui-button--icon-small {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+
+    .icon { width: 14px; height: 14px; }
+}
+
+button.ui-button--block {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+    justify-content: flex-start;
+    text-align: left;
+}
+
+/* The single solid action: Process / Resume. */
+button.ui-button--primary {
+    background: var(--accent);
+    color: #1b1310;
+    font-weight: 500;
+
+    &:hover:not(:disabled) {
+        background: var(--accent-strong);
+        color: #1b1310;
+    }
+    &:active:not(:disabled) {
+        background: var(--accent);
+    }
+    &:disabled {
+        background: var(--bg-field);
+        color: var(--text-disabled);
+    }
+}

@@ -16,25 +16,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  nix:
-    name: nix flake check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
-        with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock', 'nix/**') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-          gc-max-store-size-linux: 5G
-          purge: true
-          purge-prefixes: nix-${{ runner.os }}-
-          purge-created: 0
-          purge-primary-key: never
-      - run: nix flake check -L
-
   build-linux:
     name: release build + AppImage (linux)
     runs-on: ubuntu-latest
@@ -50,9 +31,11 @@ jobs:
         with:
           cache-targets: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - run: cargo build --locked --release -p reconst-prep
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked -p reconst-prep --no-default-features --all-targets -- -D warnings
       - run: ./packaging/appimage/build.sh
-      - run: ./packaging/appimage/build.sh --cli
+      - run: cargo test --locked --release --workspace
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: packaging/appimage/*.AppImage
@@ -75,18 +58,10 @@ jobs:
         with:
           cache-targets: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - run: cargo build --locked --release -p reconst-prep
       - name: Velopack installer
         shell: pwsh
         run: ./packaging/windows/build-velopack.ps1
-      - name: Command line zip
-        shell: pwsh
-        run: ./packaging/windows/build-cli-zip.ps1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: packaging/windows/releases/ReconstPrep-win-Setup.exe
-          archive: false
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          path: packaging/windows/releases/reconst-prep-cli-*-win-x64.zip
           archive: false

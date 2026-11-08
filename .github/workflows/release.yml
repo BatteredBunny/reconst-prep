@@ -20,7 +20,6 @@ jobs:
         with:
           persist-credentials: false
       - run: ./scripts/install-deps-ubuntu.sh
-      - run: cargo build --locked --release -p reconst-prep
       - run: ./packaging/appimage/build.sh
       - run: ./packaging/appimage/build.sh --cli
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -40,7 +39,6 @@ jobs:
       - name: Install build dependencies
         shell: pwsh
         run: ./scripts/install-deps-windows.ps1
-      - run: cargo build --locked --release -p reconst-prep
       - name: Velopack installer
         shell: pwsh
         run: ./packaging/windows/build-velopack.ps1

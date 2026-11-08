@@ -12,7 +12,7 @@
   librsvg,
   python3,
   makeFontsConf,
-  xorg,
+  xorg-server,
   imagemagick,
 }:
 let
@@ -44,7 +44,11 @@ let
     reconst-prep.craneArgs
     // {
       pname = "reconst-prep-screenshots";
-      nativeBuildInputs = reconst-prep.craneArgs.nativeBuildInputs ++ [ ffmpeg-headless xorg.xorgserver imagemagick ];
+      nativeBuildInputs = reconst-prep.craneArgs.nativeBuildInputs ++ [
+        ffmpeg-headless
+        xorg-server
+        imagemagick
+      ];
       cargoTestExtraArgs = "-p reconst-prep-gui screenshots::readme -- --ignored --exact";
       preCheck = ''
         export DISPLAY=:99 WINIT_UNIX_BACKEND=x11 WINIT_X11_SCALE_FACTOR=2

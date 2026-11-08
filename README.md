@@ -75,6 +75,7 @@ Run it straight from the repository:
 
 ```bash
 nix run github:BatteredBunny/reconst-prep
+nix run github:BatteredBunny/reconst-prep#reconst-prep-cli # Or just the cli only variant
 ```
 
 Or add the flake to your inputs and install the package, either directly or through the overlay:
@@ -109,9 +110,13 @@ chmod +x reconst-prep-*-x86_64.AppImage
 ./reconst-prep-*-x86_64.AppImage gui
 ```
 
+For servers and scripts there is also `reconst-prep_cli-<version>-x86_64.AppImage`, which is only the cli without GUI bits.
+
 # Windows
 
 Download `ReconstPrep-win-Setup.exe` from the [releases page](https://github.com/BatteredBunny/reconst-prep/releases) and run it. ffmpeg is included.
+
+For the command line alone without installing anything, download `reconst-prep-cli-<version>-win-x64.zip`, unpack it anywhere and run `reconst-prep.exe` from a terminal.
 
 # Building from source
 

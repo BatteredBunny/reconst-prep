@@ -30,6 +30,7 @@ fn main() {
 
 fn run_subcommand(command: Command) {
     match command {
+        #[cfg(feature = "gui")]
         Command::Gui {
             inputs,
             profile,

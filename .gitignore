@@ -1,7 +1,10 @@
 /target
 *.AppImage
-/packaging/appimage/AppDir
+/packaging/appimage/AppDir*
+/packaging/appimage/linuxdeploy
 /packaging/windows/releases
+/packaging/windows/publish*
+/packaging/windows/ffmpeg-*.zip
 result
 /.direnv
 /.pre-commit-config.yaml

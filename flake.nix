@@ -34,6 +34,7 @@
     {
       overlays.default = final: _prev: {
         reconst-prep = final.callPackage ./nix/package.nix { craneLib = crane.mkLib final; };
+        reconst-prep-cli = final.reconst-prep.override { withGui = false; };
       };
 
       packages = forAllSystems (
@@ -43,7 +44,7 @@
           scope = lib.makeScope pkgs.newScope (final: self.overlays.default final pkgs);
         in
         {
-          inherit (scope) reconst-prep;
+          inherit (scope) reconst-prep reconst-prep-cli;
           default = scope.reconst-prep;
           screenshots = pkgs.callPackage ./nix/screenshots.nix {
             inherit (scope) reconst-prep;

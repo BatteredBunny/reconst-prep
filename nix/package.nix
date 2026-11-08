@@ -18,21 +18,28 @@
   libxi,
   libxrandr,
   vulkan-loader,
+  # False builds the command line alone: no `gui` subcommand and no windowing libraries.
+  withGui ? true,
 }:
 
 let
   ffmpeg = ffmpeg-headless;
 
-  guiLibs = [
+  # GPU undistortion lives in the core, so the command line needs these too.
+  gpuLibs = [
     libGL
+    vulkan-loader
+  ];
+
+  guiLibs = gpuLibs ++ [
     libxkbcommon
     wayland
     libx11
     libxcursor
     libxi
     libxrandr
-    vulkan-loader
   ];
+  runtimeLibs = if withGui then guiLibs else gpuLibs;
 
   schemaDirs = lib.concatStringsSep ":" [
     "${gtk3}/share/gsettings-schemas/${gtk3.name}"
@@ -53,7 +60,7 @@ let
 
   common = {
     inherit src;
-    pname = "reconst-prep";
+    pname = if withGui then "reconst-prep" else "reconst-prep-cli";
     version = "0.2.0";
     strictDeps = true;
     GYROFLOW_SKIP_LENS_PROFILE_DOWNLOAD = "1";
@@ -62,7 +69,10 @@ let
       pkg-config
       python3
     ];
-    buildInputs = guiLibs ++ [ gtk3 ];
+    buildInputs = runtimeLibs ++ lib.optional withGui gtk3;
+  }
+  // lib.optionalAttrs (!withGui) {
+    cargoExtraArgs = "--locked -p reconst-prep --no-default-features";
   };
 
   # Depends only on Cargo.lock, so the package and clippy share it and CI's Nix store cache keeps it between commits.
@@ -86,11 +96,13 @@ craneLib.buildPackage (
       installShellFiles
     ];
 
-    cargoTestExtraArgs = "--workspace";
+    # The GUI crate's tests need its libraries, which the command line build leaves out.
+    cargoTestExtraArgs = if withGui then "--workspace" else "-p reconst-prep-core";
 
     postInstall = ''
       rm -rf $out/lib
-
+    ''
+    + lib.optionalString withGui ''
       install -Dm644 packaging/appimage/reconst-prep.desktop \
         $out/share/applications/reconst-prep.desktop
       install -Dm644 assets/icon.svg \
@@ -108,8 +120,8 @@ craneLib.buildPackage (
     postFixup = ''
       wrapProgram $out/bin/reconst-prep \
         --prefix PATH : ${lib.makeBinPath [ ffmpeg ]} \
-        --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath guiLibs} \
-        --prefix XDG_DATA_DIRS : ${schemaDirs}
+        --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
+        ${lib.optionalString withGui "--prefix XDG_DATA_DIRS : ${schemaDirs}"}
     '';
 
     nativeInstallCheckInputs = [ versionCheckHook ];

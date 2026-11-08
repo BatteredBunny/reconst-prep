@@ -10,11 +10,22 @@ use reconst_prep_core::pipeline::OutputSpec;
 use reconst_prep_core::seg::SegClassParams;
 use reconst_prep_core::undistort::Interp;
 
-const ABOUT: &str = "Reconstruction-ready image datasets from video in one pass:\n\
+macro_rules! about {
+    ($tail:literal) => {
+        concat!(
+            "Reconstruction-ready image datasets from video in one pass:\n\
 frames, optionally lens-corrected, resized, thinned to the ones worth\n\
 keeping, and with the sky or people masked out.\n\n\
 Everything is opt-in. Without flags this is a fast video-to-frames\n\
-splitter. `reconst-prep gui` opens the graphical frontend.";
+splitter.",
+            $tail
+        )
+    };
+}
+#[cfg(feature = "gui")]
+const ABOUT: &str = about!(" `reconst-prep gui` opens the graphical frontend.");
+#[cfg(not(feature = "gui"))]
+const ABOUT: &str = about!("");
 
 fn long_version() -> &'static str {
     // Leaked because clap wants 'static; runs once at startup.
@@ -50,6 +61,7 @@ pub struct Cli {
 pub enum Command {
     /// Launch the graphical frontend. Same pipeline, with a live before and
     /// after preview.
+    #[cfg(feature = "gui")]
     ///
     /// Everything here is optional. The window opens empty. Naming a job saves
     /// finding it again in a file dialog.

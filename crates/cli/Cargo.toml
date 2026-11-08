@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 reconst-prep-core = { path = "../core" }
-reconst-prep-gui = { path = "../gui" }
+reconst-prep-gui = { path = "../gui", optional = true }
 clap.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true
@@ -20,3 +20,7 @@ ctrlc.workspace = true
 log.workspace = true
 env_logger.workspace = true
 indicatif = "0.18.6"
+
+[features]
+default = ["gui"]
+gui = ["dep:reconst-prep-gui"]

@@ -35,7 +35,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked -p reconst-prep --no-default-features --all-targets -- -D warnings
       - run: ./packaging/appimage/build.sh
-      - run: cargo test --locked --release --workspace
+      - run: cargo test --locked --profile ci-test --workspace
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: packaging/appimage/*.AppImage

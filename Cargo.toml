@@ -46,5 +46,9 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 [profile.release]
 lto = "thin"
 
+[profile.ci-test]
+inherits = "release"
+lto = false
+
 [profile.dev.package."*"]
 opt-level = 2

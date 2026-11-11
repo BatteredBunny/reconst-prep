@@ -36,7 +36,7 @@ peniko = "0.6"
 webbrowser = "1.2.6"
 async-channel = "2.5.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "time"] }
-rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
+rfd = { version = "0.18.0", default-features = false, features = ["gtk3"] }
 log = "0.4.34"
 env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
 rustfft = "6.4.1"
